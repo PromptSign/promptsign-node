@@ -1,0 +1,50 @@
+{
+  "name": "@promptsign/reference",
+  "version": "0.1.0",
+  "description": "PromptSign reference implementation: zero-dependency signing and verification of AI instruction files (SKILL.md, AGENTS.md, CLAUDE.md, agent definitions)",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PromptSign/promptsign-node.git"
+  },
+  "homepage": "https://github.com/PromptSign/promptsign-node#readme",
+  "keywords": [
+    "promptsign",
+    "signing",
+    "provenance",
+    "supply-chain",
+    "verification",
+    "skills",
+    "agents"
+  ],
+  "bin": {
+    "promptsign-reference": "./src/index.mjs"
+  },
+  "exports": {
+    ".": "./src/verify.mjs",
+    "./canonicalize": "./src/canonicalize.mjs",
+    "./manifest": "./src/manifest.mjs",
+    "./bundle": "./src/bundle.mjs",
+    "./policy": "./src/policy.mjs"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "format": "prettier --write \"src/*.mjs\" \"test/*.mjs\"",
+    "format:check": "prettier --check \"src/*.mjs\" \"test/*.mjs\""
+  },
+  "devDependencies": {
+    "prettier": "^3.9.6"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "Apache-2.0"
+}

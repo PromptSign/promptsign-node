@@ -1,0 +1,48 @@
+# Test the reference implementation on every platform it runs on. Path
+# handling and CRLF collapsing in canonicalization differ by OS, so the
+# matrix is load-bearing here, not decoration.
+#
+# Cross-implementation conformance against the Rust CLI runs from
+# promptsign-cli's ci.yml, which checks this repo out as IMPL_A.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # npm ci installs strictly from package-lock.json and fails if the
+      # lockfile has drifted from package.json.
+      - run: npm ci
+
+      - run: npm test
+
+  lint:
+    name: format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run format:check

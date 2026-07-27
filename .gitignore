@@ -1,0 +1,21 @@
+# Node
+node_modules/
+npm-debug.log*
+*.tgz
+.npm/
+
+# Local promptsign state (keys, pins, config) if the CLI is run inside the repo.
+# Real state lives in ~/.promptsign (or $PROMPTSIGN_HOME); these guard against
+# accidental `keygen --dir .` or `PROMPTSIGN_HOME=.` runs.
+.promptsign/
+*.pem
+
+# Signing artifacts produced by running the CLI here
+*.psig.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
