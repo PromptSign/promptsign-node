@@ -13,7 +13,21 @@ import {
 
 export const MANIFEST_SCHEMA = 'promptsign/manifest/v1';
 
-const SKIP_DIRS = new Set(['.promptsign', '.git', 'node_modules', '__pycache__', '.venv']);
+const SKIP_DIRS = new Set([
+  '.promptsign',
+  '.git',
+  'node_modules',
+  '__pycache__',
+  '.venv',
+  '.in_use',
+]);
+// Host-owned bookkeeping files that the Claude Code runtime writes into a
+// versioned plugin cache directory after install. The publisher does not own
+// them, and they are not part of the signed artifact. See spec/01-manifest.md
+// "Host-owned bookkeeping" for the full, closed list. This is not a
+// signer-controlled exclusion: it changes only when the runtime's own
+// bookkeeping set changes.
+const SKIP_FILES = new Set(['.orphaned_at']);
 const EXEC_EXTS = new Set([
   '.py',
   '.sh',
@@ -81,7 +95,7 @@ function walk(root, rel = '') {
       if (SKIP_DIRS.has(ent.name)) continue;
       out.push(...walk(root, relChild));
     } else if (ent.isFile()) {
-      if (isSidecar(ent.name)) continue;
+      if (isSidecar(ent.name) || SKIP_FILES.has(ent.name)) continue;
       out.push(relChild);
     }
   }

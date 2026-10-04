@@ -196,6 +196,25 @@ test('a marker inside a signed directory fails despite intact integrity', () => 
   assert.equal(selfCheck.action, 'fail');
 });
 
+test('host-owned bookkeeping paths do not break verification', () => {
+  // Claude Code writes `.in_use/<pid>` into the signed directory while a
+  // session holds an installed plugin, and writes `.orphaned_at` there once a
+  // newer version supersedes it. Neither file is part of the signed artifact.
+  // A genuine, correctly-signed release must still verify clean with them
+  // present, or every installed plugin on the machine reports a false FAIL
+  // the moment a session opens it.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'psign-hostowned-'));
+  makeSkill(dir);
+  signDir(dir);
+
+  fs.mkdirSync(path.join(dir, '.in_use'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.in_use', '60356'), JSON.stringify({ pid: 60356 }));
+  fs.writeFileSync(path.join(dir, '.orphaned_at'), '1788889068596');
+
+  const r = verifyTarget(dir);
+  assert.equal(r.action, 'pass');
+});
+
 test('verify-tree discovers bundles, sidecars and unsigned known files', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'psign-tree-'));
   const skill = path.join(root, 'skills', 'good-skill');
