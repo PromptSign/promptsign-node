@@ -16,7 +16,12 @@ test('a project policy cannot relax the user policy', () => {
 test('a project policy cannot add trust', () => {
   const user = pol([{ pattern: '*', keyid: 'a'.repeat(64), action: 'enforce' }]);
   const project = pol([{ pattern: '*', keyid: 'b'.repeat(64), action: 'enforce' }]);
-  const res = evaluateWithProject(user, project, { name: 'x', identity: 'i', keyid: 'b'.repeat(64), signed: true }, {});
+  const res = evaluateWithProject(
+    user,
+    project,
+    { name: 'x', identity: 'i', keyid: 'b'.repeat(64), signed: true },
+    {},
+  );
   assert.equal(res.action, 'fail');
 });
 
@@ -27,9 +32,14 @@ test('a project policy can tighten, and never touches pins', () => {
   assert.equal(res.action, 'fail');
   assert.ok(res.findings.some((f) => f.message.startsWith('project policy: ')));
 
-  const signed = evaluateWithProject(user, project, { name: 'x', identity: 'me', keyid: 'k', signed: true }, {
-    x: { name: 'x', identity: 'someone-else', keyid: 'k2' },
-  });
+  const signed = evaluateWithProject(
+    user,
+    project,
+    { name: 'x', identity: 'me', keyid: 'k', signed: true },
+    {
+      x: { name: 'x', identity: 'someone-else', keyid: 'k2' },
+    },
+  );
   assert.equal(signed.action, 'pass');
   assert.equal(signed.pinUpdate, null);
 });
@@ -39,7 +49,10 @@ test('the project policy is loaded beside the user policy, not instead', () => {
   const userPath = path.join(base, 'user.json');
   fs.mkdirSync(path.join(base, 'repo', '.promptsign'), { recursive: true });
   fs.writeFileSync(userPath, JSON.stringify(pol([], 'enforce')));
-  fs.writeFileSync(path.join(base, 'repo', '.promptsign', 'policy.json'), JSON.stringify(pol([], 'off')));
+  fs.writeFileSync(
+    path.join(base, 'repo', '.promptsign', 'policy.json'),
+    JSON.stringify(pol([], 'off')),
+  );
   const eff = loadEffectivePolicy(userPath, path.join(base, 'repo'));
   assert.equal(eff.policy.default, 'enforce');
   assert.equal(eff.project.default, 'off');

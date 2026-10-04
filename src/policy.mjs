@@ -24,9 +24,11 @@ function readPolicyFile(p) {
 // ~/.promptsign/policy.json, built-in default. A project directory never
 // supplies it; see loadProjectPolicy.
 export function loadPolicy(explicitPath) {
-  const candidates = [explicitPath, process.env.PROMPTSIGN_POLICY, path.join(promptsignHome(), 'policy.json')].filter(
-    Boolean,
-  );
+  const candidates = [
+    explicitPath,
+    process.env.PROMPTSIGN_POLICY,
+    path.join(promptsignHome(), 'policy.json'),
+  ].filter(Boolean);
   for (const p of candidates) {
     if (fs.existsSync(p)) return { policy: readPolicyFile(p), source: p };
     if (p === explicitPath) throw new Error(`policy not found: ${p}`);
@@ -147,6 +149,9 @@ export function evaluateWithProject(policy, project, input, pins = loadPins()) {
   return {
     ...res,
     action: order[extra.action] > order[res.action] ? extra.action : res.action,
-    findings: [...res.findings, ...extra.findings.map((f) => ({ ...f, message: `project policy: ${f.message}` }))],
+    findings: [
+      ...res.findings,
+      ...extra.findings.map((f) => ({ ...f, message: `project policy: ${f.message}` })),
+    ],
   };
 }

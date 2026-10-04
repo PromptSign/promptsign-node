@@ -8,7 +8,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hasSignatureMarker, readBundle, verifyEnvelope } from './bundle.mjs';
 import { checkIntegrity, walkFiles, CONTEXT_INJECTED } from './manifest.mjs';
-import { loadEffectivePolicy, loadPins, savePins, evaluateWithProject, matchRule } from './policy.mjs';
+import {
+  loadEffectivePolicy,
+  loadPins,
+  savePins,
+  evaluateWithProject,
+  matchRule,
+} from './policy.mjs';
 
 // True when the effective policy action for `name` is "off" — marker findings
 // then degrade from fail to warn (but are always surfaced).
@@ -151,7 +157,12 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
   }
 
   const pins = loadPins();
-  const res = evaluateWithProject(policy, project, { name: manifest.name, identity, keyid, signed: true }, pins);
+  const res = evaluateWithProject(
+    policy,
+    project,
+    { name: manifest.name, identity, keyid, signed: true },
+    pins,
+  );
   findings.push(...res.findings);
   if (res.action === 'fail') action = 'fail';
   else if (res.action === 'warn' && action === 'pass') action = 'warn';
