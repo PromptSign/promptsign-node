@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hasSignatureMarker, readBundle, verifyEnvelope } from './bundle.mjs';
 import { checkIntegrity, walkFiles, CONTEXT_INJECTED } from './manifest.mjs';
-import { loadPolicy, loadPins, savePins, evaluate, matchRule } from './policy.mjs';
+import { loadEffectivePolicy, loadPins, savePins, evaluateWithProject, matchRule } from './policy.mjs';
 
 // True when the effective policy action for `name` is "off" — marker findings
 // then degrade from fail to warn (but are always surfaced).
@@ -69,7 +69,7 @@ function applyMarkers(msgs, policy, name, findings, action) {
 // skipPolicy: crypto + integrity only — used by the signer's post-sign
 // self-check, where the local policy/pin store must not gate signing.
 export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy = false } = {}) {
-  const { policy, source: policySource } = loadPolicy(policyPath);
+  const { policy, project, source: policySource } = loadEffectivePolicy(policyPath);
   const abs = path.resolve(target);
   const st = fs.statSync(abs);
   const root = st.isDirectory() ? abs : path.dirname(abs);
@@ -78,7 +78,7 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
 
   const found = readBundle(abs);
   if (!found) {
-    const res = evaluate(policy, { name: fallbackName, signed: false });
+    const res = evaluateWithProject(policy, project, { name: fallbackName, signed: false });
     const findings = res.findings;
     const action = applyMarkers(markerMsgs, policy, fallbackName, findings, res.action);
     return {
@@ -151,7 +151,7 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
   }
 
   const pins = loadPins();
-  const res = evaluate(policy, { name: manifest.name, identity, keyid, signed: true }, pins);
+  const res = evaluateWithProject(policy, project, { name: manifest.name, identity, keyid, signed: true }, pins);
   findings.push(...res.findings);
   if (res.action === 'fail') action = 'fail';
   else if (res.action === 'warn' && action === 'pass') action = 'warn';

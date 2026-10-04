@@ -14,22 +14,41 @@ export const DEFAULT_POLICY = {
   rules: [{ pattern: '*', action: 'warn', tofu: true }],
 };
 
-export function loadPolicy(explicitPath, projectDir = process.cwd()) {
-  const candidates = [
-    explicitPath,
-    process.env.PROMPTSIGN_POLICY,
-    path.join(projectDir, '.promptsign', 'policy.json'),
-    path.join(promptsignHome(), 'policy.json'),
-  ].filter(Boolean);
+function readPolicyFile(p) {
+  const policy = JSON.parse(fs.readFileSync(p, 'utf8'));
+  if (policy.schema !== POLICY_SCHEMA) throw new Error(`${p}: unsupported policy schema`);
+  return policy;
+}
+
+// The user's policy (spec/04): explicit path, $PROMPTSIGN_POLICY,
+// ~/.promptsign/policy.json, built-in default. A project directory never
+// supplies it; see loadProjectPolicy.
+export function loadPolicy(explicitPath) {
+  const candidates = [explicitPath, process.env.PROMPTSIGN_POLICY, path.join(promptsignHome(), 'policy.json')].filter(
+    Boolean,
+  );
   for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      const policy = JSON.parse(fs.readFileSync(p, 'utf8'));
-      if (policy.schema !== POLICY_SCHEMA) throw new Error(`${p}: unsupported policy schema`);
-      return { policy, source: p };
-    }
+    if (fs.existsSync(p)) return { policy: readPolicyFile(p), source: p };
     if (p === explicitPath) throw new Error(`policy not found: ${p}`);
   }
   return { policy: DEFAULT_POLICY, source: '(built-in default)' };
+}
+
+// A project's own <project>/.promptsign/policy.json, if any. The project is
+// untrusted input: this policy can only add requirements to the user's.
+export function loadProjectPolicy(projectDir = process.cwd()) {
+  const p = path.join(projectDir, '.promptsign', 'policy.json');
+  return fs.existsSync(p) ? { policy: readPolicyFile(p), source: p } : null;
+}
+
+export function loadEffectivePolicy(explicitPath, projectDir = process.cwd()) {
+  const user = loadPolicy(explicitPath);
+  const project = loadProjectPolicy(projectDir);
+  return {
+    policy: user.policy,
+    project: project ? project.policy : null,
+    source: project ? `${user.source} + ${project.source} (tighten only)` : user.source,
+  };
 }
 
 export function globMatch(pattern, value) {
@@ -114,4 +133,20 @@ export function evaluate(policy, { name, identity, keyid, signed }, pins = loadP
     }
   }
   return { action, findings, rule, pinUpdate };
+}
+
+// Evaluate the user's policy, then the project's on top of it. The project
+// can only make the outcome stricter: its findings are added and the worse
+// action wins. It never checks or writes TOFU pins (those are the user's).
+export function evaluateWithProject(policy, project, input, pins = loadPins()) {
+  const res = evaluate(policy, input, pins);
+  if (!project) return res;
+  const noTofu = { ...project, rules: (project.rules || []).map((r) => ({ ...r, tofu: false })) };
+  const extra = evaluate(noTofu, input, {});
+  const order = { pass: 0, warn: 1, fail: 2 };
+  return {
+    ...res,
+    action: order[extra.action] > order[res.action] ? extra.action : res.action,
+    findings: [...res.findings, ...extra.findings.map((f) => ({ ...f, message: `project policy: ${f.message}` }))],
+  };
 }
