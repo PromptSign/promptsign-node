@@ -14,7 +14,12 @@ import {
   savePins,
   evaluateWithProject,
   matchRule,
+  onTrustBundleStale,
 } from './policy.mjs';
+import { installedUserBundles } from './trustbundle.mjs';
+import { formatIso8601, nowSecs } from './util.mjs';
+
+const FORMAT_PROMPTSIGN = 'promptsign';
 
 // True when the effective policy action for `name` is "off" — marker findings
 // then degrade from fail to warn (but are always surfaced).
@@ -70,7 +75,24 @@ function applyMarkers(msgs, policy, name, findings, action) {
   return ACTION_RANK[bump] > ACTION_RANK[action] ? bump : action;
 }
 
-// Result: { target, name, identity, keyid, signed, action, findings }
+// A root from a trust bundle past its expiry still verifies, with a finding
+// whose weight the user policy sets (spec/07 §5.6). Only bundle roots, named
+// <bundle>/<root>, can be stale.
+function staleBundleFinding(policy, root) {
+  const slash = root.indexOf('/');
+  if (slash === -1) return null;
+  const bundle = root.slice(0, slash);
+  const stale = installedUserBundles(nowSecs()).find((i) => i.bundle.name === bundle && i.stale);
+  if (!stale) return null;
+  return {
+    level: onTrustBundleStale(policy) === 'fail' ? 'error' : 'warn',
+    message: `trust bundle "${bundle}" expired at ${formatIso8601(stale.bundle.expires)}: run "promptsign trust fetch" to refresh it`,
+  };
+}
+
+// Result: { target, policySource, name, version?, kind?, identity, issuer?,
+// keyid, integratedTime?, format?, root?, signed, action, findings }, the
+// field order and omissions of the Rust VerifyResult.
 // action: 'pass' | 'warn' | 'fail'
 // skipPolicy: crypto + integrity only — used by the signer's post-sign
 // self-check, where the local policy/pin store must not gate signing.
@@ -117,13 +139,30 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
       name: fallbackName,
       identity: null,
       keyid: null,
+      format: FORMAT_PROMPTSIGN,
       signed: true,
       action,
       findings,
     };
   }
 
-  const { manifest, identity, keyid } = envelope;
+  const { manifest, identity, keyid, issuer, root: trustRoot } = envelope;
+  // The log's integration time of an authenticated bundle, if it carries one.
+  const integratedTime = Number.isInteger(found.bundle.transparency?.integratedTime)
+    ? found.bundle.transparency.integratedTime
+    : undefined;
+  const signerFields = {
+    name: manifest.name,
+    version: manifest.version ?? undefined,
+    kind: manifest.kind ?? undefined,
+    identity,
+    issuer,
+    keyid,
+    integratedTime,
+    format: FORMAT_PROMPTSIGN,
+    root: trustRoot,
+    signed: true,
+  };
   const findings = [];
   let action = 'pass';
 
@@ -142,25 +181,22 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
       findings.push({ level: 'error', message: m });
       action = 'fail';
     }
-    return {
-      target,
-      policySource: '(skipped)',
-      name: manifest.name,
-      version: manifest.version,
-      kind: manifest.kind,
-      identity,
-      keyid,
-      signed: true,
-      action,
-      findings,
-    };
+    return { target, policySource: '(skipped)', ...signerFields, action, findings };
   }
 
   const pins = loadPins();
+  // Keyless signers pin identity+issuer, never the ephemeral key (spec/05 §5).
   const res = evaluateWithProject(
     policy,
     project,
-    { name: manifest.name, identity, keyid, signed: true },
+    {
+      name: manifest.name,
+      identity,
+      keyid: issuer ? '' : keyid,
+      issuer,
+      root: trustRoot,
+      signed: true,
+    },
     pins,
   );
   findings.push(...res.findings);
@@ -168,6 +204,13 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
   else if (res.action === 'warn' && action === 'pass') action = 'warn';
 
   action = applyMarkers(markerMsgs, policy, manifest.name, findings, action);
+
+  const stale = trustRoot ? staleBundleFinding(policy, trustRoot) : null;
+  if (stale) {
+    if (stale.level === 'error') action = 'fail';
+    else if (action === 'pass') action = 'warn';
+    findings.push(stale);
+  }
 
   if (action !== 'fail' && res.pinUpdate && updatePins) {
     pins[res.pinUpdate.name] = res.pinUpdate;
@@ -178,16 +221,5 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
     });
   }
 
-  return {
-    target,
-    policySource,
-    name: manifest.name,
-    version: manifest.version,
-    kind: manifest.kind,
-    identity,
-    keyid,
-    signed: true,
-    action,
-    findings,
-  };
+  return { target, policySource, ...signerFields, action, findings };
 }

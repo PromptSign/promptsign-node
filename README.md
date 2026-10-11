@@ -19,7 +19,8 @@ resolving a dependency tree.
 ## Scope
 
 **This is not a port of the `promptsign` CLI, and it is not the tool to install
-for day-to-day use.** It implements the Phase 1 formats only:
+for day-to-day use.** It signs with a local key only, and verifies everything
+below:
 
 | Spec | Implemented |
 |---|---|
@@ -27,18 +28,23 @@ for day-to-day use.** It implements the Phase 1 formats only:
 | [02 — canonicalization](https://github.com/PromptSign/spec/blob/main/02-canonicalization.md) | yes |
 | [03 — signature bundle](https://github.com/PromptSign/spec/blob/main/03-bundle.md) | yes, `ed25519` local-key signing |
 | [04 — trust policy](https://github.com/PromptSign/spec/blob/main/04-policy.md) | yes, including trust-on-first-use pins |
-| [05 — keyless](https://github.com/PromptSign/spec/blob/main/05-keyless.md) | **no** |
+| [05 — keyless](https://github.com/PromptSign/spec/blob/main/05-keyless.md) | verification only, offline; **no** keyless signing |
 | [06 — revocation feed](https://github.com/PromptSign/spec/blob/main/06-revocation.md) | **no** |
+| [07: trust roots](https://github.com/PromptSign/spec/blob/main/07-trust-roots.md) | yes for keyless roots: the built-in public root, named roots, trust bundles (`trust add`, `fetch`, `list`, `rm`); `--ca` certificate roots are stored and listed but verify nothing yet |
 
-Keyless signing needs network access — an OpenID Connect token, a short-lived
-Fulcio certificate, a Rekor log entry — which is exactly the kind of dependency
-this implementation exists to avoid having. It lives in the `promptsign` CLI
-instead.
+Keyless verification needs no network: the certificate chain and the
+transparency-log entry are stapled into the bundle, and the roots they chain to
+sit in `$PROMPTSIGN_HOME/trust/`, in the same layout the Rust CLI uses, so both
+can share one home. Only `trust fetch` and `trust add <url>` go online.
+Keyless signing needs an OpenID Connect token, a short-lived Fulcio certificate
+and a Rekor log entry, which is exactly the kind of dependency this
+implementation exists to avoid having. It lives in the `promptsign` CLI, as do
+the revocation feed, embedded (frontmatter) signatures and OpenSSF Model
+Signing verification.
 
-Encountering a keyless bundle here is **not** silently treated as unsigned: an
-unrecognized `signer.scheme` is a hard failure with `unsupported signature
-scheme`, per spec 05 §1. Failing closed on formats you do not understand is the
-behavior being demonstrated.
+An unrecognized `signer.scheme` is a hard failure with `unsupported signature
+scheme`, per spec 05 §1: a bundle in a format the verifier does not understand
+is never treated as unsigned.
 
 The version number reflects this narrower scope and intentionally lags the
 Rust implementation.
@@ -52,6 +58,9 @@ node src/index.mjs keygen --identity "github:alice"
 node src/index.mjs sign ./skills/pdf --name acme/pdf --version 1.0.0
 node src/index.mjs verify ./skills/pdf
 node src/index.mjs verify-tree ~/.claude .claude
+
+node src/index.mjs trust add acme https://acme.example/trust-bundle.json --yes
+node src/index.mjs trust list
 ```
 
 The package is **`@promptsign/reference`** and the command it installs is
@@ -81,8 +90,9 @@ survives a Windows checkout.
 
 ## Zero dependencies
 
-`package.json` has no `dependencies` key at all. Ed25519 comes from
-`node:crypto`, everything else from the standard library. Requires Node ≥ 20.
+`package.json` has no `dependencies` key at all. Ed25519 and ECDSA come from
+`node:crypto`, X.509 parsing from a small DER reader (`src/der.mjs`),
+everything else from the standard library. Requires Node ≥ 20.
 
 For a verifier this is a security property rather than a style preference: a
 verifier is a trust root the moment anything relies on it, and a trust root

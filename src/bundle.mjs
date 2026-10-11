@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { sha256 } from './canonicalize.mjs';
+import { verifyKeyless } from './keyless.mjs';
 import { MANIFEST_SCHEMA } from './manifest.mjs';
 
 export const BUNDLE_SCHEMA = 'promptsign/bundle/v1';
@@ -44,13 +45,33 @@ export function signManifest(manifest, privateKey, identity) {
 }
 
 // Cryptographic verification only — integrity against disk and trust policy
-// are separate, later steps. Throws on any envelope problem.
+// are separate, later steps. Throws on any envelope problem. A keyless
+// signer (spec/05) also yields its OIDC issuer and the trust root (spec/07)
+// its certificate chained to.
 export function verifyEnvelope(bundle) {
   if (bundle?.schema !== BUNDLE_SCHEMA)
     throw new Error(`unsupported bundle schema: ${bundle?.schema}`);
   const { envelope, signer } = bundle;
   if (envelope?.payloadType !== PAYLOAD_TYPE) {
     throw new Error(`unsupported payload type: ${envelope?.payloadType}`);
+  }
+  if (signer?.scheme === 'keyless') {
+    const kv = verifyKeyless(bundle);
+    let manifest;
+    try {
+      manifest = JSON.parse(kv.payload.toString('utf8'));
+    } catch (e) {
+      throw new Error(`invalid manifest payload: ${e.message}`);
+    }
+    if (manifest?.schema !== MANIFEST_SCHEMA)
+      throw new Error(`unsupported manifest schema: ${manifest?.schema}`);
+    return {
+      manifest,
+      identity: kv.identity,
+      keyid: kv.leafKeyid,
+      issuer: kv.issuer,
+      root: kv.root,
+    };
   }
   if (signer?.scheme !== 'ed25519')
     throw new Error(`unsupported signature scheme: ${signer?.scheme}`);

@@ -13,6 +13,10 @@ npm-debug.log*
 # Signing artifacts produced by running the CLI here
 *.psig.json
 
+# Test fixtures carry real signatures and certificates; keep them.
+!test/fixtures/**/*.psig.json
+!test/fixtures/**/*.pem
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

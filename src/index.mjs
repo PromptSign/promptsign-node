@@ -19,6 +19,8 @@ import {
 import { DEFAULT_POLICY, loadPolicy, loadPins, savePins } from './policy.mjs';
 import { verifyTarget } from './verify.mjs';
 import { verifyTree } from './verifytree.mjs';
+import { DEFAULT_ROOT } from './trustroot.mjs';
+import * as trust from './trustcmd.mjs';
 import crypto from 'node:crypto';
 
 const VERSION = '0.1.0';
@@ -32,13 +34,20 @@ Usage:
   promptsign-reference verify-tree <root>... [--policy path] [--json] [--quiet]
   promptsign-reference policy init [--global]
   promptsign-reference pin list | pin rm <name>
+  promptsign-reference trust fetch [--force] [<bundle>] | trust show
+  promptsign-reference trust add <name> --ca <pem> | trust add <name> --trusted-root <json> [--yes]
+  promptsign-reference trust add <name> <url|file> [--signer <glob>] [--yes]
+  promptsign-reference trust list | trust rm <name>
 
 Signing unit is a bundle manifest: for a directory, every file in it (skills
 include the scripts they run); for a single file, a sidecar <file>.psig.json.
 Verification = signature + integrity against disk + trust policy + TOFU pins.
 
-This is the reference implementation: local-key signing of spec 01-04 only.
-Keyless signing and revocation live in the promptsign CLI.`;
+This is the reference implementation. It signs with a local key (spec 01-04)
+and verifies local-key and keyless (Sigstore) signatures, offline, against the
+built-in public root, named roots and trust bundles (spec 05, 07). Keyless
+signing, the revocation feed, embedded signatures and OpenSSF Model Signing
+verification live in the promptsign CLI.`;
 
 function fail(msg) {
   process.stderr.write(`promptsign-reference: ${msg}\n`);
@@ -47,15 +56,33 @@ function fail(msg) {
 
 const ICONS = { pass: '[ OK ]', warn: '[WARN]', fail: '[FAIL]', unsigned: '[----]' };
 
+// Runtime bookkeeping a harness writes into an artifact directory after it
+// installed it. Naming it is explanation only: the finding stands.
+function harnessNote(relPath) {
+  if (relPath.split('/')[0] === '.in_use' || relPath === '.orphaned_at') {
+    return 'Claude Code plugin bookkeeping, written into this directory after install.';
+  }
+  return null;
+}
+
 function printResult(r, { quiet = false } = {}) {
   if (quiet && r.action === 'pass') return;
   const icon = r.signed ? ICONS[r.action] : ICONS.unsigned;
-  const who = r.identity ? ` signed by ${r.identity}` : ' (unsigned)';
+  let who = ' (unsigned)';
+  if (r.identity) who = ` signed by ${r.identity}${r.issuer ? ` via ${r.issuer}` : ''}`;
+  else if (r.signed) who = ' (signature did not verify)';
+  const tags = [];
+  if (r.format === 'oms') tags.push('OMS');
+  if (r.root && r.root !== DEFAULT_ROOT) tags.push(`root ${r.root}`);
+  const tagText = tags.length ? ` (${tags.join(', ')})` : '';
   process.stdout.write(
-    `${icon} ${r.name}${r.version ? '@' + r.version : ''}${who} — ${r.target}\n`,
+    `${icon} ${r.name}${r.version ? '@' + r.version : ''}${who}${tagText} — ${r.target}\n`,
   );
+  const unlisted = 'unlisted file present: ';
   for (const f of r.findings) {
     process.stdout.write(`       ${f.level.toUpperCase()}: ${f.message}\n`);
+    const note = f.message.startsWith(unlisted) && harnessNote(f.message.slice(unlisted.length));
+    if (note) process.stdout.write(`              note: ${note}\n`);
   }
 }
 
@@ -211,6 +238,54 @@ function cmdPin(args) {
   }
 }
 
+async function cmdTrust(args) {
+  const sub = args[0];
+  if (sub === 'fetch') {
+    const { values, positionals } = parseArgs({
+      args: args.slice(1),
+      allowPositionals: true,
+      options: { force: { type: 'boolean' } },
+    });
+    // A name refreshes that bundle alone. No name refreshes the built-in
+    // root, then every installed bundle (spec/07 §2.2).
+    if (positionals[0] !== undefined) return trust.fetchBundles(positionals[0]);
+    await trust.fetchPublicRoot(Boolean(values.force));
+    return trust.fetchBundles(null);
+  }
+  if (sub === 'show') return trust.show();
+  if (sub === 'list') return trust.list();
+  if (sub === 'rm') {
+    if (!args[1]) fail('trust rm: missing <name>');
+    return trust.remove(args[1]);
+  }
+  if (sub === 'add') {
+    const { values, positionals } = parseArgs({
+      args: args.slice(1),
+      allowPositionals: true,
+      options: {
+        ca: { type: 'string' },
+        'trusted-root': { type: 'string' },
+        signer: { type: 'string' },
+        yes: { type: 'boolean' },
+      },
+    });
+    const name = positionals[0];
+    if (!name) fail('trust add: missing <name>');
+    if (positionals[1] !== undefined) {
+      if (values.ca !== undefined || values['trusted-root'] !== undefined) {
+        fail('trust add: give a bundle <url|file>, or --ca / --trusted-root, not both');
+      }
+      return trust.addBundle(name, positionals[1], values.signer, Boolean(values.yes));
+    }
+    return trust.addRoot(name, {
+      ca: values.ca,
+      trustedRoot: values['trusted-root'],
+      yes: Boolean(values.yes),
+    });
+  }
+  fail('trust: expected "fetch", "show", "add", "list" or "rm"');
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
 try {
   switch (cmd) {
@@ -231,6 +306,9 @@ try {
       break;
     case 'pin':
       cmdPin(rest);
+      break;
+    case 'trust':
+      await cmdTrust(rest);
       break;
     case 'version':
     case '--version':
