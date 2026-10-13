@@ -14,6 +14,7 @@ import {
   storeTrustBundle,
 } from './trustbundle.mjs';
 import {
+  DEFAULT_ROOT,
   addCaRoot,
   addTrustedRoot,
   loadRegistry,
@@ -22,6 +23,7 @@ import {
   rootFromTrustedRoot,
   userTrustDir,
 } from './trustroot.mjs';
+import { Repo as TufRepo } from './tuf.mjs';
 import { formatIso8601, joinRaw, nowSecs } from './util.mjs';
 
 const DEFAULT_FULCIO = 'https://fulcio.sigstore.dev';
@@ -319,9 +321,51 @@ function ensureNoLoss(file, label, fetched) {
   );
 }
 
-// Cache the public Fulcio CA chain and Rekor key (the built-in root) so
-// keyless verification is offline from then on. Both are fetched and
-// checked before either is written.
+const SIGNING_CONFIG_MEDIA_TYPE = 'application/vnd.dev.sigstore.signingconfig.v0.2+json';
+
+// The public trusted_root.json, which adds the Rekor v2 log and the timestamp
+// authority to the pinned pair, and the public signing config, both from
+// Sigstore's TUF repository. A private deployment named by
+// PROMPTSIGN_FULCIO_URL or PROMPTSIGN_REKOR_URL skips them unless
+// PROMPTSIGN_TUF_URL names its own repository.
+async function tufDocuments() {
+  const set = (v) => Boolean(process.env[v]);
+  if ((set('PROMPTSIGN_FULCIO_URL') || set('PROMPTSIGN_REKOR_URL')) && !set('PROMPTSIGN_TUF_URL')) {
+    return [];
+  }
+  const [trustedRoot, signingConfig] = await new TufRepo().fetchTargets([
+    'trusted_root.json',
+    'signing_config.v0.2.json',
+  ]);
+  // Validated before anything is written, like the pair.
+  let doc;
+  try {
+    doc = JSON.parse(trustedRoot.toString('utf8'));
+    rootFromTrustedRoot(DEFAULT_ROOT, doc);
+  } catch (e) {
+    throw new Error(`trusted_root.json: ${e.message}`);
+  }
+  let config;
+  try {
+    config = JSON.parse(signingConfig.toString('utf8'));
+  } catch (e) {
+    throw new Error(`signing_config.v0.2.json: ${e.message}`);
+  }
+  if (config?.mediaType !== SIGNING_CONFIG_MEDIA_TYPE) {
+    throw new Error(
+      `signing_config.v0.2.json: signing config: mediaType is not ${SIGNING_CONFIG_MEDIA_TYPE}`,
+    );
+  }
+  return [
+    ['trusted_root.json', trustedRoot],
+    ['signing_config.json', signingConfig],
+  ];
+}
+
+// Cache the public Fulcio CA chain and Rekor key (the built-in root), and the
+// public trusted_root.json and signing config, so keyless verification is
+// offline from then on. It fetches and checks everything before it writes
+// anything.
 export async function fetchPublicRoot(force) {
   const dir = trustDir();
   fs.mkdirSync(dir, { recursive: true });
@@ -340,6 +384,7 @@ export async function fetchPublicRoot(force) {
   if (pemBlockDers(rekorPem, 'PUBLIC KEY').length === 0) {
     throw new Error('Rekor: response is not a PEM public key');
   }
+  const documents = await tufDocuments();
   const fulcioPath = joinRaw(dir, 'fulcio.pem');
   const rekorPath = joinRaw(dir, 'rekor.pub');
   if (!force) {
@@ -350,6 +395,15 @@ export async function fetchPublicRoot(force) {
   fs.writeFileSync(rekorPath, rekorPem);
   out(`wrote ${fulcioPath}`);
   out(`wrote ${rekorPath}`);
+  // The TUF documents replace what is there without the check above. Sigstore
+  // signs them with its root keys and keeps retired logs and CAs in them with
+  // closed windows, so an entry that disappears is one Sigstore removed on
+  // purpose.
+  for (const [name, bytes] of documents) {
+    const p = joinRaw(dir, name);
+    fs.writeFileSync(p, bytes);
+    out(`wrote ${p}`);
+  }
   out(`rekor log id: ${trustedLogIds()[0]}`);
 }
 

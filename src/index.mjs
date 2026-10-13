@@ -325,5 +325,9 @@ try {
       fail(`unknown command "${cmd}" (try: promptsign-reference help)`);
   }
 } catch (e) {
-  fail(e.message);
+  // exitCode rather than process.exit: exiting while fetch is still closing a
+  // socket trips an assertion inside libuv on Windows.
+  process.stderr.write(`promptsign-reference: ${e.message}
+`);
+  process.exitCode = 1;
 }

@@ -36,6 +36,8 @@ Keyless verification needs no network: the certificate chain and the
 transparency-log entry are stapled into the bundle, and the roots they chain to
 sit in `$PROMPTSIGN_HOME/trust/`, in the same layout the Rust CLI uses, so both
 can share one home. Only `trust fetch` and `trust add <url>` go online.
+`trust fetch` takes Sigstore's `trusted_root.json` and signing config from its
+TUF repository and checks them against the TUF root in `src/tuf-root.json`.
 Keyless signing needs an OpenID Connect token, a short-lived Fulcio certificate
 and a Rekor log entry, which is exactly the kind of dependency this
 implementation exists to avoid having. It lives in the `promptsign` CLI, as do
