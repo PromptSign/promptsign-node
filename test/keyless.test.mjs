@@ -194,24 +194,24 @@ test('issuing certificates must be CAs within their path length and key usage', 
 test('integratedTime must fall inside the leaf validity', () => {
   assert.throws(
     () => verify(scenario({ leafWindow: [T + 1, T + 600] })),
-    new RegExp(`log integration time ${T} outside certificate validity \\[${T + 1}, ${T + 600}\\]`),
+    new RegExp(`signing time ${T} outside certificate validity \\[${T + 1}, ${T + 600}\\]`),
   );
 });
 
 test("integratedTime must fall inside the CA's and the log's validFor", () => {
   const iso = formatIso8601;
   assert.throws(
-    () => verify(scenario({ rootOpts: { caValid: { start: iso(T - DAY), end: iso(T) } } })),
+    () => verify(scenario({ rootOpts: { caValid: { start: iso(T - DAY), end: iso(T - 1) } } })),
     new RegExp(
-      `certificate authority "CN=root" of trust root "corp" was outside its validity window when the log witnessed the signature \\(integratedTime ${T}\\)`,
+      `certificate authority "CN=root" of trust root "corp" was outside its validity window when the signature was made \\(${T}\\)`,
     ),
   );
   assert.throws(
     () => verify(scenario({ rootOpts: { logValid: { start: iso(T + 1) } } })),
-    /transparency log [0-9a-f]{16}… of trust root "corp" was outside its validity window at integratedTime/,
+    /transparency log [0-9a-f]{16}… of trust root "corp" was outside its validity window when the signature was made/,
   );
-  // [start, end): the last second before the end still verifies.
-  const s = scenario({ rootOpts: { caValid: { start: iso(T - DAY), end: iso(T + 1) } } });
+  // [start, end]: a signature made at the end itself still verifies.
+  const s = scenario({ rootOpts: { caValid: { start: iso(T - DAY), end: iso(T) } } });
   assert.equal(verify(s).root, 'corp');
 });
 

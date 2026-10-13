@@ -71,6 +71,8 @@ export function verifyEnvelope(bundle) {
       keyid: kv.leafKeyid,
       issuer: kv.issuer,
       root: kv.root,
+      // When the signature was made (spec/05 §4 step 5).
+      signedAt: kv.signedAt,
     };
   }
   if (signer?.scheme !== 'ed25519')

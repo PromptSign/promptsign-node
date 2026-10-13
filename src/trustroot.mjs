@@ -1,7 +1,8 @@
 // Multi-root trust (spec/07): the registry of named roots a verifier accepts.
 //
 // The built-in root "sigstore-public" is the pinned pair in the trust
-// directory (fulcio.pem + rekor.pub). Every other root is a document in
+// directory (fulcio.pem + rekor.pub), joined by the public trusted_root.json
+// when the directory has one. Every other root is a document in
 // Sigstore's trusted_root.json shape under $PROMPTSIGN_HOME/trust/roots/
 // <name>.json, or a root of an installed trust bundle, named <bundle>/<root>.
 // A root with transparency logs verifies keyless signatures; one with
@@ -13,21 +14,22 @@ import { sha256 } from './canonicalize.mjs';
 import { isSelfSigned } from './chain.mjs';
 import { parseCertificate, pemBodies } from './der.mjs';
 import { promptsignHome } from './keys.mjs';
-import { parseRekorLogs, rekorLogFromSpki, trustDir } from './keyless.mjs';
+import { parseRekorLogs, rekorLogEd25519, rekorLogFromSpki, trustDir } from './keyless.mjs';
 import { installedIn } from './trustbundle.mjs';
 import { b64decode, formatIso8601, joinRaw, nowSecs, parseIso8601 } from './util.mjs';
 
 export const DEFAULT_ROOT = 'sigstore-public';
 export const TRUSTED_ROOT_MEDIA_TYPE = 'application/vnd.dev.sigstore.trustedroot+json;version=0.1';
 
-// A validFor window, [start, end) in epoch seconds (spec/07 §4). A missing
-// side is open, and a missing window is always valid.
+// A validFor window, [start, end] in epoch seconds (spec/07 §4): closed at
+// both ends, like Sigstore's TimeRange. A missing side is open, and a missing
+// window is always valid.
 export function window(start = null, end = null) {
   return {
     start,
     end,
     contains(t) {
-      return !(this.start !== null && t < this.start) && !(this.end !== null && t >= this.end);
+      return !(this.start !== null && t < this.start) && !(this.end !== null && t > this.end);
     },
   };
 }
@@ -62,7 +64,7 @@ function windowToJson(w) {
   return out;
 }
 
-function makeRoot(name, caCerts, caValid, rekorLogs) {
+function makeRoot(name, caCerts, caValid, rekorLogs, tsas = []) {
   if (caCerts.length === 0) throw new Error(`trust root "${name}": no CA certificates`);
   // The anchor is the self-signed certificate when the root carries one,
   // otherwise the last certificate given.
@@ -72,6 +74,9 @@ function makeRoot(name, caCerts, caValid, rekorLogs) {
     caCerts,
     caValid,
     rekorLogs,
+    // RFC 3161 timestamp authorities whose timestamps date signatures under
+    // this root (spec/07 §1): [{ certs, valid, uri }].
+    tsas,
     fingerprint: sha256(anchor.der),
     subject: anchor.subject,
     // For a root from a trust bundle, that bundle's expiry (spec/07 §5.6).
@@ -119,34 +124,53 @@ export function rootCaOnly(name, caPem) {
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 
-// A root from a Sigstore trusted_root.json document (spec/07 §1). Logs whose
-// key is not ECDSA P-256 are skipped, and so is a log whose stated id is not
-// its key's.
+// The certificates of a certChain object, in order.
+function certsOf(chain) {
+  return arr(chain?.certificates).map((c) => {
+    if (typeof c?.rawBytes !== 'string') throw new Error('certificate without rawBytes');
+    const der = b64decode(c.rawBytes);
+    if (!der) throw new Error('invalid base64 in certificate rawBytes');
+    try {
+      return parseCertificate(der);
+    } catch (e) {
+      throw new Error(`certificate parse: ${e.message}`);
+    }
+  });
+}
+
+// A root from a Sigstore trusted_root.json document (spec/07 §1). Logs with a
+// key other than ECDSA P-256 or Ed25519 are skipped, as is an Ed25519 log
+// without a baseUrl (its id hashes the origin) and a log whose stated id is
+// not the one its key and origin give.
 export function rootFromTrustedRoot(name, doc) {
   const caCerts = [];
   const caValid = [];
   for (const ca of arr(doc?.certificateAuthorities)) {
     const w = windowFromJson(ca?.validFor);
-    for (const c of arr(ca?.certChain?.certificates)) {
-      if (typeof c?.rawBytes !== 'string') throw new Error('certificate without rawBytes');
-      const der = b64decode(c.rawBytes);
-      if (!der) throw new Error('invalid base64 in certificate rawBytes');
-      try {
-        caCerts.push(parseCertificate(der));
-      } catch (e) {
-        throw new Error(`certificate parse: ${e.message}`);
-      }
+    for (const cert of certsOf(ca?.certChain)) {
+      caCerts.push(cert);
       caValid.push(w);
     }
   }
   const rekorLogs = [];
   for (const log of arr(doc?.tlogs)) {
     const details = log?.publicKey?.keyDetails;
-    if (typeof details !== 'string' || !details.startsWith('PKIX_ECDSA_P256')) continue;
-    if (typeof log.publicKey.rawBytes !== 'string') throw new Error('log key without rawBytes');
-    const der = b64decode(log.publicKey.rawBytes);
-    if (!der) throw new Error('invalid base64 in log key rawBytes');
-    const rekor = rekorLogFromSpki(der);
+    const baseUrl = typeof log?.baseUrl === 'string' && log.baseUrl !== '' ? log.baseUrl : null;
+    const der = () => {
+      if (typeof log.publicKey.rawBytes !== 'string') throw new Error('log key without rawBytes');
+      const out = b64decode(log.publicKey.rawBytes);
+      if (!out) throw new Error('invalid base64 in log key rawBytes');
+      return out;
+    };
+    let rekor;
+    if (typeof details === 'string' && details.startsWith('PKIX_ECDSA_P256')) {
+      rekor = rekorLogFromSpki(der());
+    } else if (details === 'PKIX_ED25519') {
+      if (baseUrl === null) continue;
+      rekor = rekorLogEd25519(der(), baseUrl);
+    } else {
+      continue;
+    }
     const stated = log.logId?.keyId;
     if (typeof stated === 'string') {
       const id = b64decode(stated);
@@ -154,9 +178,37 @@ export function rootFromTrustedRoot(name, doc) {
       if (id.toString('hex') !== rekor.logId) continue;
     }
     rekor.valid = windowFromJson(log.publicKey.validFor);
+    rekor.baseUrl = baseUrl;
     rekorLogs.push(rekor);
   }
-  return makeRoot(name, caCerts, caValid, rekorLogs);
+  const tsas = [];
+  for (const tsa of arr(doc?.timestampAuthorities)) {
+    const certs = certsOf(tsa?.certChain);
+    if (certs.length === 0) continue;
+    tsas.push({
+      certs,
+      valid: windowFromJson(tsa?.validFor),
+      uri: typeof tsa?.uri === 'string' ? tsa.uri : '',
+    });
+  }
+  return makeRoot(name, caCerts, caValid, rekorLogs, tsas);
+}
+
+// The built-in root: the pinned pair joined with the public
+// trusted_root.json. The document's CAs and logs come first, so its windows
+// and base URLs apply; the pair adds what the document lacks.
+function joined(name, doc, pinned) {
+  const rekorLogs = [...doc.rekorLogs];
+  for (const log of pinned.rekorLogs) {
+    if (!rekorLogs.some((l) => l.logId === log.logId)) rekorLogs.push(log);
+  }
+  return makeRoot(
+    name,
+    [...doc.caCerts, ...pinned.caCerts],
+    [...doc.caValid, ...pinned.caValid],
+    rekorLogs,
+    doc.tsas,
+  );
 }
 
 // Recursively sort object keys: the Rust side writes serde_json Values,
@@ -179,15 +231,27 @@ export function rootToTrustedRoot(root) {
   const tlogs = root.rekorLogs.map((l) => {
     const publicKey = {
       rawBytes: l.spkiDer.toString('base64'),
-      keyDetails: 'PKIX_ECDSA_P256_SHA_256',
+      keyDetails: l.keyDetails(),
     };
     const w = windowToJson(l.valid);
     if (w) publicKey.validFor = w;
-    return {
+    const log = {
       hashAlgorithm: 'SHA2_256',
       publicKey,
       logId: { keyId: Buffer.from(l.logId, 'hex').toString('base64') },
     };
+    if (l.baseUrl) log.baseUrl = l.baseUrl;
+    return log;
+  });
+  const timestampAuthorities = root.tsas.map((t) => {
+    const out = {
+      subject: { commonName: t.certs[t.certs.length - 1]?.subject ?? '' },
+      certChain: { certificates: t.certs.map((c) => ({ rawBytes: c.der.toString('base64') })) },
+    };
+    if (t.uri !== '') out.uri = t.uri;
+    const w = windowToJson(t.valid);
+    if (w) out.validFor = w;
+    return out;
   });
   const groups = [];
   root.caCerts.forEach((c, i) => {
@@ -208,7 +272,7 @@ export function rootToTrustedRoot(root) {
     tlogs,
     certificateAuthorities,
     ctlogs: [],
-    timestampAuthorities: [],
+    timestampAuthorities,
   });
 }
 
@@ -241,17 +305,33 @@ const isDir = (p) => {
   }
 };
 
+// The built-in root from the trust directory: the pinned pair (fulcio.pem +
+// rekor.pub), the public trusted_root.json, or both joined. The document is
+// what carries Rekor v2 logs and timestamp authorities.
 export function loadPinned(dir) {
   const fulcio = joinRaw(dir, 'fulcio.pem');
   const rekor = joinRaw(dir, 'rekor.pub');
-  if (!fs.existsSync(fulcio) || !fs.existsSync(rekor)) return null;
-  const pem = fs.readFileSync(fulcio);
-  const rekorPem = fs.readFileSync(rekor, 'utf8');
-  try {
-    return rootFromPem(DEFAULT_ROOT, pem, rekorPem);
-  } catch (e) {
-    throw new Error(`${dir}: ${e.message}`);
+  const docPath = joinRaw(dir, 'trusted_root.json');
+  let pinned = null;
+  if (fs.existsSync(fulcio) && fs.existsSync(rekor)) {
+    const pem = fs.readFileSync(fulcio);
+    const rekorPem = fs.readFileSync(rekor, 'utf8');
+    try {
+      pinned = rootFromPem(DEFAULT_ROOT, pem, rekorPem);
+    } catch (e) {
+      throw new Error(`${dir}: ${e.message}`);
+    }
   }
+  let doc = null;
+  if (fs.existsSync(docPath)) {
+    try {
+      doc = rootFromTrustedRoot(DEFAULT_ROOT, JSON.parse(fs.readFileSync(docPath, 'utf8')));
+    } catch (e) {
+      throw new Error(`${docPath}: ${e.message}`);
+    }
+  }
+  if (doc && pinned) return joined(DEFAULT_ROOT, doc, pinned);
+  return doc ?? pinned;
 }
 
 export function loadNamedIn(rdir) {

@@ -127,12 +127,12 @@ test('pemBodies decodes every block of a label, oldest first', () => {
   assert.deepEqual(pemBodies(pem, 'PUBLIC KEY'), []);
 });
 
-test('validFor windows are [start, end), open on a missing side', () => {
+test('validFor windows are [start, end], open on a missing side', () => {
   const w = window(100, 200);
   assert.ok(!w.contains(99));
   assert.ok(w.contains(100));
-  assert.ok(w.contains(199));
-  assert.ok(!w.contains(200));
+  assert.ok(w.contains(200));
+  assert.ok(!w.contains(201));
   assert.ok(window(null, 200).contains(-1e12));
   assert.ok(window(100, null).contains(1e12));
   assert.ok(window().contains(0));
@@ -142,7 +142,8 @@ test('validFor JSON: absent sides are open, bad times are errors', () => {
   const w = windowFromJson({ start: '2025-01-01T00:00:00Z', end: '2026-07-01T00:00:00Z' });
   assert.equal(w.start, 1735689600);
   assert.equal(w.end, 1782864000);
-  assert.ok(!w.contains(1782864000));
+  assert.ok(w.contains(1782864000));
+  assert.ok(!w.contains(1782864001));
   assert.deepEqual([windowFromJson(undefined).start, windowFromJson(null).end], [null, null]);
   assert.equal(windowFromJson({ start: '2025-01-01T00:00:00Z' }).end, null);
   assert.throws(

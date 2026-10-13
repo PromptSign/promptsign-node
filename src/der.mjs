@@ -204,7 +204,7 @@ export function parseCertificate(der) {
   }
   const f = children(tbs.content);
   let i = f[0]?.tag === 0xa0 ? 1 : 0;
-  const [, , issuer, validity, subject, spki] = f.slice(i, i + 6);
+  const [serial, , issuer, validity, subject, spki] = f.slice(i, i + 6);
   if (!spki || spki.tag !== TAG.SEQUENCE || validity.tag !== TAG.SEQUENCE) {
     throw new Error('DER: not a certificate');
   }
@@ -229,6 +229,8 @@ export function parseCertificate(der) {
     // First content byte of a BIT STRING counts its unused bits.
     sigUnusedBits: sigBits.content[0],
     signature: sigBits.content.subarray(1),
+    // The serial number's INTEGER content, as encoded.
+    serial: serial.content,
     issuerRaw: issuer.raw,
     subjectRaw: subject.raw,
     issuer: nameToString(issuer),

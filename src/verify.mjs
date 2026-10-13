@@ -146,11 +146,10 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
     };
   }
 
-  const { manifest, identity, keyid, issuer, root: trustRoot } = envelope;
-  // The log's integration time of an authenticated bundle, if it carries one.
-  const integratedTime = Number.isInteger(found.bundle.transparency?.integratedTime)
-    ? found.bundle.transparency.integratedTime
-    : undefined;
+  const { manifest, identity, keyid, issuer, root: trustRoot, signedAt } = envelope;
+  // When a keyless signature was made: the log's integratedTime, else the
+  // earliest verified timestamp.
+  const integratedTime = signedAt;
   const signerFields = {
     name: manifest.name,
     version: manifest.version ?? undefined,
