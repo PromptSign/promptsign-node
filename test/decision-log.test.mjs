@@ -20,7 +20,8 @@ const policy = (extra) =>
   JSON.stringify({ schema: 'promptsign/policy/v1', default: 'warn', rules: [], ...extra });
 
 function setup() {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'psign-dlog-'));
+  // Real path: macOS links /var to /private/var, and the CLI's cwd resolves it.
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'psign-dlog-')));
   const dirs = {
     base,
     home: path.join(base, 'ps'),

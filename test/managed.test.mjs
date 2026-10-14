@@ -27,7 +27,8 @@ const policy = (extra) =>
 // A user home with the pinned public root, an empty managed directory, and a
 // project directory to run in.
 function setup() {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'psign-managed-'));
+  // Real path: macOS links /var to /private/var, and the CLI's cwd resolves it.
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'psign-managed-')));
   const dirs = {
     base,
     home: path.join(base, 'ps'),
