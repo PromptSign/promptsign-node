@@ -88,25 +88,44 @@ export function parseTrustBundle(name, bytes) {
     roots.push(root);
   }
 
+  // A signer's or a feed's root: the built-in root or one of this bundle's.
+  const resolveRoot = (root, whose) => {
+    if (root === DEFAULT_ROOT) return root;
+    if (Object.hasOwn(docs, root)) return `${name}/${root}`;
+    throw new Error(
+      `trust bundle ${whose} root "${root}" is neither ${DEFAULT_ROOT} nor one of the bundle's roots`,
+    );
+  };
+  const fieldOf = (obj, whose) => (key) => {
+    const x = isObject(obj) ? obj[key] : undefined;
+    if (typeof x !== 'string' || x === '') throw new Error(`trust bundle ${whose} has no ${key}`);
+    return x;
+  };
+
   const list = get('signers');
   if (!Array.isArray(list) || list.length === 0) throw new Error('trust bundle lists no signers');
   const signers = list.map((s) => {
-    const field = (key) => {
-      const x = isObject(s) ? s[key] : undefined;
-      if (typeof x !== 'string' || x === '') throw new Error(`trust bundle signer has no ${key}`);
-      return x;
-    };
-    const root = field('root');
-    let resolved;
-    if (root === DEFAULT_ROOT) resolved = root;
-    else if (Object.hasOwn(docs, root)) resolved = `${name}/${root}`;
-    else {
-      throw new Error(
-        `trust bundle signer root "${root}" is neither ${DEFAULT_ROOT} nor one of the bundle's roots`,
-      );
-    }
-    return { identity: field('identity'), issuer: field('issuer'), root: resolved };
+    const field = fieldOf(s, 'signer');
+    const root = resolveRoot(field('root'), 'signer');
+    return { identity: field('identity'), issuer: field('issuer'), root };
   });
+
+  // Where the publisher serves its revocation feed and who signs it (spec/06
+  // §3). The issuer is optional.
+  let revocationFeed = null;
+  if (isObject(v) && Object.hasOwn(v, 'revocationFeed')) {
+    const f = v.revocationFeed;
+    if (isObject(f) && f.issuer !== undefined && typeof f.issuer !== 'string') {
+      throw new Error('trust bundle revocationFeed issuer is not a string');
+    }
+    const field = fieldOf(f, 'revocationFeed');
+    revocationFeed = {
+      url: field('url'),
+      identity: field('identity'),
+      issuer: isObject(f) && typeof f.issuer === 'string' ? f.issuer : null,
+      root: resolveRoot(field('root'), 'revocationFeed'),
+    };
+  }
 
   const suggested = get('name');
   return {
@@ -117,6 +136,7 @@ export function parseTrustBundle(name, bytes) {
     expires,
     roots,
     signers,
+    revocationFeed,
   };
 }
 
