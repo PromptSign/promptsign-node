@@ -4,6 +4,7 @@
 //   3. re - verify integrity against disk
 //   4. evaluate trust policy + TOFU pins.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { hasSignatureMarker, readBundle, verifyEnvelope } from './bundle.mjs';
@@ -13,6 +14,21 @@ import { loadFullRegistry } from './trustroot.mjs';
 import { formatIso8601, nowSecs } from './util.mjs';
 
 const FORMAT_PROMPTSIGN = 'promptsign';
+
+// What a verification established beyond its verdict, for the decision log
+// (spec/08): { payloadDigest, rule, revocation }. Not enumerable, so the JSON
+// output stays as it is.
+function withEvidence(result, evidence = {}) {
+  return Object.defineProperty(result, 'evidence', {
+    value: { payloadDigest: null, rule: null, revocation: null, ...evidence },
+  });
+}
+
+// sha256 of the DSSE payload, the digest a revocation entry matches.
+function payloadDigest(bundle) {
+  const payload = Buffer.from(bundle?.envelope?.payload ?? '', 'base64');
+  return `sha256:${crypto.createHash('sha256').update(payload).digest('hex')}`;
+}
 
 // An `x-promptsign:` marker inside a context-injected file (CLAUDE.md/AGENTS.md/
 // OpenClaw bootstrap files) is never a signature — its presence is a failure.
@@ -98,16 +114,19 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
     const res = eff.evaluate({ name: fallbackName, signed: false }, {});
     const findings = res.findings;
     const action = applyMarkers(markerMsgs, eff, fallbackName, findings, res.action);
-    return {
-      target,
-      policySource,
-      name: fallbackName,
-      identity: null,
-      keyid: null,
-      signed: false,
-      action,
-      findings,
-    };
+    return withEvidence(
+      {
+        target,
+        policySource,
+        name: fallbackName,
+        identity: null,
+        keyid: null,
+        signed: false,
+        action,
+        findings,
+      },
+      { rule: res.decidedBy },
+    );
   }
 
   let envelope;
@@ -122,7 +141,7 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
       { level: action === 'fail' ? 'error' : 'warn', message: `invalid signature: ${e.message}` },
     ];
     action = applyMarkers(markerMsgs, eff, fallbackName, findings, action);
-    return {
+    return withEvidence({
       target,
       policySource,
       name: fallbackName,
@@ -132,7 +151,7 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
       signed: true,
       action,
       findings,
-    };
+    });
   }
 
   const { manifest, identity, keyid, issuer, root: trustRoot, signedAt } = envelope;
@@ -169,7 +188,10 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
       findings.push({ level: 'error', message: m });
       action = 'fail';
     }
-    return { target, policySource: '(skipped)', ...signerFields, action, findings };
+    return withEvidence(
+      { target, policySource: '(skipped)', ...signerFields, action, findings },
+      { payloadDigest: payloadDigest(found.bundle) },
+    );
   }
 
   const pins = loadPins();
@@ -207,5 +229,8 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
     });
   }
 
-  return { target, policySource, ...signerFields, action, findings };
+  return withEvidence(
+    { target, policySource, ...signerFields, action, findings },
+    { payloadDigest: payloadDigest(found.bundle), rule: res.decidedBy },
+  );
 }

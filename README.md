@@ -68,7 +68,9 @@ node src/index.mjs policy show     # the managed policy, yours, and the project'
 
 An administrator's managed directory (spec/04) applies here too: its policy is
 the base the user's and the project's tighten, and `trust add|rm|fetch --managed`
-writes its trust directory.
+writes its trust directory. `"decision_log": true` in the managed or the user
+policy, or `--decision-log <file>`, appends a record of each verification to a
+local JSON-lines log (spec/08).
 
 The package is **`@promptsign/reference`** and the command it installs is
 **`promptsign-reference`** — neither is plain `promptsign`, which belongs to the

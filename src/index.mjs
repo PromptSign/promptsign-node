@@ -17,6 +17,7 @@ import {
   promptsignHome,
 } from './keys.mjs';
 import { DEFAULT_POLICY, loadPins, policyLayers, savePins } from './policy.mjs';
+import * as decisionLog from './decisionlog.mjs';
 import { verifyTarget } from './verify.mjs';
 import { verifyTree } from './verifytree.mjs';
 import { DEFAULT_ROOT, sortKeys } from './trustroot.mjs';
@@ -30,8 +31,8 @@ const USAGE = `promptsign-reference ${VERSION} — PKI signing for AI instructio
 Usage:
   promptsign-reference keygen [--identity <id>] [--force]
   promptsign-reference sign <dir|file> [--name n] [--version v] [--kind k] [--identity id] [--key path]
-  promptsign-reference verify <dir|file> [--policy path] [--json] [--no-pin-updates]
-  promptsign-reference verify-tree <root>... [--policy path] [--json] [--quiet]
+  promptsign-reference verify <dir|file> [--policy path] [--json] [--no-pin-updates] [--decision-log file]
+  promptsign-reference verify-tree <root>... [--policy path] [--json] [--quiet] [--decision-log file]
   promptsign-reference policy init [--global] | policy show
   promptsign-reference pin list | pin rm <name>
   promptsign-reference trust fetch [--force] [--managed] [<bundle>] | trust show
@@ -146,6 +147,31 @@ function cmdSign(args) {
   );
 }
 
+// Appends records to the decision logs the policies turn on and to `file`
+// (spec/08). A failed write prints a warning and changes nothing else.
+function logDecisions(policyPath, file, records) {
+  for (const e of decisionLog.append(decisionLog.sinks(policyPath, file), records)) {
+    process.stderr.write(`promptsign-reference: ${e}\n`);
+  }
+}
+
+function logContext(event) {
+  return { verifier: `promptsign-reference/${VERSION}`, event };
+}
+
+// Runs a verification; when it throws, logs the error and rethrows.
+function logged(values, event, target, run) {
+  try {
+    return run();
+  } catch (e) {
+    const ctx = logContext(event);
+    logDecisions(values.policy, values['decision-log'], [
+      decisionLog.errorRecord(ctx, target ?? '', target, e.message),
+    ]);
+    throw e;
+  }
+}
+
 function cmdVerify(args) {
   const { values, positionals } = parseArgs({
     args,
@@ -154,15 +180,21 @@ function cmdVerify(args) {
       policy: { type: 'string' },
       json: { type: 'boolean' },
       'no-pin-updates': { type: 'boolean' },
+      'decision-log': { type: 'string' },
     },
   });
   const target = positionals[0];
   if (!target) fail('verify: missing <dir|file>');
   if (!fs.existsSync(target)) fail(`verify: no such path: ${target}`);
-  const r = verifyTarget(target, {
-    policyPath: values.policy,
-    updatePins: !values['no-pin-updates'],
-  });
+  const r = logged(values, 'verify', target, () =>
+    verifyTarget(target, {
+      policyPath: values.policy,
+      updatePins: !values['no-pin-updates'],
+    }),
+  );
+  logDecisions(values.policy, values['decision-log'], [
+    decisionLog.verifiedRecord(logContext('verify'), r),
+  ]);
   if (values.json) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
   else printResult(r);
   exitFor([r]);
@@ -177,13 +209,22 @@ function cmdVerifyTree(args) {
       json: { type: 'boolean' },
       quiet: { type: 'boolean' },
       'no-pin-updates': { type: 'boolean' },
+      'decision-log': { type: 'string' },
     },
   });
   if (positionals.length === 0) fail('verify-tree: missing <root>...');
-  const results = verifyTree(positionals, {
-    policyPath: values.policy,
-    updatePins: !values['no-pin-updates'],
-  });
+  const results = logged(values, 'verify-tree', null, () =>
+    verifyTree(positionals, {
+      policyPath: values.policy,
+      updatePins: !values['no-pin-updates'],
+    }),
+  );
+  const ctx = logContext('verify-tree');
+  logDecisions(
+    values.policy,
+    values['decision-log'],
+    results.map((r) => decisionLog.verifiedRecord(ctx, r)),
+  );
   if (values.json) {
     process.stdout.write(JSON.stringify(results, null, 2) + '\n');
   } else {

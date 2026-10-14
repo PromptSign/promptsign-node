@@ -95,6 +95,11 @@ const withoutTofu = (policy) => ({
   rules: (policy.rules || []).map((r) => ({ ...r, tofu: false })),
 });
 
+// The rule behind a policy outcome, as the decision log records it (spec/08).
+function decidingRule(layer, policy, rule) {
+  return { layer, pattern: rule.pattern, action: rule.action || policy.default || 'warn' };
+}
+
 // The policy layers for one verification, with the methods that combine
 // them. `base` is the managed policy, else the user's.
 export function effectivePolicy(managed, user, project, source = '') {
@@ -113,11 +118,19 @@ export function effectivePolicy(managed, user, project, source = '') {
     // findings, a project policy adds "project policy: " ones, and the worst
     // action wins. TOFU pins are the user's: the base or the user layer
     // checks them once, a project layer never does.
+    // decidedBy names the layer and rule that set the action: the base
+    // layer's, or the first layer that made it worse.
     evaluate(input, pins = loadPins()) {
       const out = evaluate(base, input, pins);
-      const tighten = (extra, prefix) => {
-        if (ORDER[extra.action] > ORDER[out.action]) out.action = extra.action;
-        out.findings.push(...extra.findings.map((f) => ({ ...f, message: prefix + f.message })));
+      out.decidedBy = decidingRule(managed ? 'managed' : 'user', base, out.rule);
+      const tighten = (extra, layer, policy) => {
+        if (ORDER[extra.action] > ORDER[out.action]) {
+          out.action = extra.action;
+          out.decidedBy = decidingRule(layer, policy, extra.rule);
+        }
+        out.findings.push(
+          ...extra.findings.map((f) => ({ ...f, message: `${layer} policy: ${f.message}` })),
+        );
         out.pinUpdate ??= extra.pinUpdate;
       };
       if (userOverManaged) {
@@ -125,10 +138,11 @@ export function effectivePolicy(managed, user, project, source = '') {
           out.rule.tofu === true
             ? evaluate(withoutTofu(userOverManaged), input, {})
             : evaluate(userOverManaged, input, pins),
-          'user policy: ',
+          'user',
+          userOverManaged,
         );
       }
-      if (project) tighten(evaluate(withoutTofu(project), input, {}), 'project policy: ');
+      if (project) tighten(evaluate(withoutTofu(project), input, {}), 'project', project);
       return out;
     },
     // True when every layer switches policy checks off for `name`. Then a
