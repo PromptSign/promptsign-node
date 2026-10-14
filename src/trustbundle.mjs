@@ -10,11 +10,13 @@
 import fs from 'node:fs';
 import { PAYLOAD_TYPE } from './bundle.mjs';
 import { sha256 } from './canonicalize.mjs';
-import { trustDir, verifyKeylessWith } from './keyless.mjs';
+import { verifyKeylessWith } from './keyless.mjs';
+import { managedTrustDir } from './managed.mjs';
 import { globMatch } from './policy.mjs';
 import {
   DEFAULT_ROOT,
   checkName,
+  loadBuiltin,
   loadNamedIn,
   loadPinned,
   rootFromTrustedRoot,
@@ -271,26 +273,57 @@ export function checkTrustBundle(dir, name, bytes, sidecar, now) {
   return checkIn(dir, pinnedList(dir), loadNamedIn(rootsDir(dir)), name, bytes, sidecar, now);
 }
 
-// checkTrustBundle against the user's trust directory and built-in root.
+// The user's trust directory, or the managed one.
+export function layerTrustDir(managed) {
+  return managed ? managedTrustDir() : userTrustDir();
+}
+
+const builtinList = () => {
+  const b = loadBuiltin();
+  return b ? [b] : [];
+};
+
+// checkTrustBundle against the user's (managed false) or the managed trust
+// directory and the built-in root. A user bundle may not take the name or a
+// root of a managed root or bundle (spec/07 §2.4).
+export function checkLayerTrustBundle(managed, name, bytes, sidecar, now) {
+  const pub = builtinList();
+  const dir = layerTrustDir(managed);
+  const named = loadNamedIn(rootsDir(dir));
+  if (!managed) {
+    const mdir = managedTrustDir();
+    const taken = loadNamedIn(rootsDir(mdir));
+    for (const b of installedIn(mdir, pub, now)) {
+      if (b.bundle.name === name) {
+        throw new Error(`trust bundle "${name}" is managed on this machine`);
+      }
+      taken.push(...b.bundle.roots);
+    }
+    if (taken.some((r) => r.name === name)) {
+      throw new Error(`"${name}" is the name of a managed trust root`);
+    }
+    named.push(...taken);
+  }
+  return checkIn(dir, pub, named, name, bytes, sidecar, now);
+}
+
+// checkLayerTrustBundle for the user's trust directory.
 export function checkUserTrustBundle(name, bytes, sidecar, now) {
-  const dir = userTrustDir();
-  return checkIn(
-    dir,
-    pinnedList(trustDir()),
-    loadNamedIn(rootsDir(dir)),
-    name,
-    bytes,
-    sidecar,
-    now,
-  );
+  return checkLayerTrustBundle(false, name, bytes, sidecar, now);
 }
 
 export function installedBundles(dir, now) {
   return installedIn(dir, pinnedList(dir), now);
 }
 
+// installedBundles for the user's (managed false) or the managed trust
+// directory, with the built-in root as the public root.
+export function installedLayerBundles(managed, now) {
+  return installedIn(layerTrustDir(managed), builtinList(), now).map((b) => ({ ...b, managed }));
+}
+
 export function installedUserBundles(now) {
-  return installedIn(userTrustDir(), pinnedList(trustDir()), now);
+  return installedLayerBundles(false, now);
 }
 
 // Write a bundle that checkTrustBundle accepted, replacing an installed

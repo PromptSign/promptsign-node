@@ -5,11 +5,13 @@
 
 import fs from 'node:fs';
 import { parseCertificate, pemBodies } from './der.mjs';
-import { trustDir, trustedLogIds } from './keyless.mjs';
+import { parseRekorLogs, trustDir, trustedLogIds } from './keyless.mjs';
+import { managedTrustDir } from './managed.mjs';
 import { globMatch } from './policy.mjs';
 import {
-  checkUserTrustBundle,
-  installedUserBundles,
+  checkLayerTrustBundle,
+  installedLayerBundles,
+  layerTrustDir,
   removeTrustBundle,
   storeTrustBundle,
 } from './trustbundle.mjs';
@@ -17,11 +19,11 @@ import {
   DEFAULT_ROOT,
   addCaRoot,
   addTrustedRoot,
+  loadFullRegistry,
   loadRegistry,
   removeRoot,
   rootCaOnly,
   rootFromTrustedRoot,
-  userTrustDir,
 } from './trustroot.mjs';
 import { Repo as TufRepo } from './tuf.mjs';
 import { formatIso8601, joinRaw, nowSecs } from './util.mjs';
@@ -97,14 +99,14 @@ async function readSource(src) {
   return { bytes: readFile(src), sidecar: readFile(`${src}.psig.json`), url: null };
 }
 
-function check(name, bytes, sidecar) {
+function check(managed, name, bytes, sidecar) {
   let parsed;
   try {
     parsed = JSON.parse(sidecar.toString('utf8'));
   } catch (e) {
     throw new Error(`trust bundle signature: ${e.message}`);
   }
-  return checkUserTrustBundle(name, bytes, parsed, nowSecs());
+  return checkLayerTrustBundle(managed, name, bytes, parsed, nowSecs());
 }
 
 const kindOf = (r) => (r.isCaOnly() ? 'certificate' : 'keyless');
@@ -150,12 +152,14 @@ function confirm(question, yes, command) {
   }
 }
 
-// `trust add <name> <url|file> [--signer <glob>] [--yes]`. A first install
-// trusts the bundle's own signers, so it needs the user's consent. An update
-// signed by a signer the installed version names does not.
-export async function addBundle(name, src, signer, yes) {
+// `trust add <name> <url|file> [--signer <glob>] [--yes] [--managed]`. A
+// first install trusts the bundle's own signers, so it needs the user's
+// consent. An update signed by a signer the installed version names does
+// not. `managed` installs into the machine's managed trust directory.
+export async function addBundle(name, src, signer, yes, managed = false) {
   const { bytes, sidecar, url } = await readSource(src);
-  const c = check(name, bytes, sidecar);
+  const c = check(managed, name, bytes, sidecar);
+  const dir = layerTrustDir(managed);
   describe(c);
   if (c.unchanged) {
     out(`trust bundle "${name}" is already at version ${c.bundle.version}`);
@@ -173,15 +177,16 @@ export async function addBundle(name, src, signer, yes) {
       'trust add',
     );
   }
-  storeTrustBundle(userTrustDir(), name, bytes, sidecar, url);
+  storeTrustBundle(dir, name, bytes, sidecar, url);
   out(
-    `${c.update ? 'updated' : 'installed'} trust bundle "${name}" version ${c.bundle.version} in ${joinRaw(userTrustDir(), 'bundles', name)}`,
+    `${c.update ? 'updated' : 'installed'} trust bundle "${name}" version ${c.bundle.version} in ${joinRaw(dir, 'bundles', name)}`,
   );
 }
 
 // `trust add <name> --ca <pem>` or `--trusted-root <json>`: one root from
-// files, shown and confirmed before it is stored.
-export function addRoot(name, { ca, trustedRoot, yes }) {
+// files. The command shows it and asks before storing it in the user's
+// registry, or with `managed` in the machine's.
+export function addRoot(name, { ca, trustedRoot, yes, managed = false }) {
   if ((ca === undefined) === (trustedRoot === undefined)) {
     throw new Error(
       'trust add: give a bundle <url|file>, or exactly one of --ca <pem> or --trusted-root <json>',
@@ -197,6 +202,10 @@ export function addRoot(name, { ca, trustedRoot, yes }) {
   };
   const candidate =
     ca !== undefined ? rootCaOnly(name, readFile(ca)) : rootFromTrustedRoot(name, readDoc());
+  const taken = loadRegistry().some((r) => r.managed && r.name.split('/')[0] === name);
+  if (taken && !managed) {
+    throw new Error(`trust add: "${name}" is the name of a managed trust root or bundle`);
+  }
   const kind = candidate.isCaOnly()
     ? 'certificate (no transparency log; checked at the current time)'
     : 'keyless (CA plus transparency log)';
@@ -204,52 +213,54 @@ export function addRoot(name, { ca, trustedRoot, yes }) {
   out(`fingerprint: sha256:${candidate.fingerprint}`);
   out(`kind:        ${kind}`);
   confirm(`Trust signatures that chain to this root as "${name}"?`, yes, 'trust add');
+  const dir = layerTrustDir(managed);
   const added =
-    ca !== undefined
-      ? addCaRoot(userTrustDir(), name, readFile(ca))
-      : addTrustedRoot(userTrustDir(), name, readDoc());
-  out(`added trust root "${added.name}" to ${joinRaw(userTrustDir(), 'roots')}`);
+    ca !== undefined ? addCaRoot(dir, name, readFile(ca)) : addTrustedRoot(dir, name, readDoc());
+  out(`added trust root "${added.name}" to ${joinRaw(dir, 'roots')}`);
 }
 
 export function list() {
-  const roots = loadRegistry();
-  const bundles = installedUserBundles(nowSecs());
+  const { roots, bundles, ignored } = loadFullRegistry(nowSecs());
   if (roots.length === 0) out('no trust roots: run "promptsign trust fetch"');
   for (const r of roots) {
     const slash = r.name.indexOf('/');
     const b = slash === -1 ? null : bundles.find((i) => i.bundle.name === r.name.slice(0, slash));
-    const from = b
-      ? `  (bundle ${b.bundle.name} v${b.bundle.version}, expires ${formatIso8601(b.bundle.expires)}${b.stale ? ', STALE: run promptsign trust fetch' : ''})`
-      : '';
+    let from = r.managed ? '  (managed)' : '';
+    if (b) {
+      from = `  (${b.managed ? 'managed ' : ''}bundle ${b.bundle.name} v${b.bundle.version}, expires ${formatIso8601(b.bundle.expires)}${b.stale ? ', STALE: run promptsign trust fetch' : ''})`;
+    }
     out(
       `${r.name.padEnd(20)} ${kindOf(r).padEnd(12)} sha256:${r.fingerprint}  ${r.subject}${from}`,
     );
   }
+  for (const note of ignored) out(note);
 }
 
-export function remove(name) {
+export function remove(name, managed = false) {
+  const dir = layerTrustDir(managed);
   let isBundle = false;
   try {
-    isBundle = fs.statSync(joinRaw(userTrustDir(), 'bundles', name)).isDirectory();
+    isBundle = fs.statSync(joinRaw(dir, 'bundles', name)).isDirectory();
   } catch {
     isBundle = false;
   }
   if (isBundle) {
-    removeTrustBundle(userTrustDir(), name);
+    removeTrustBundle(dir, name);
     out(`removed trust bundle "${name}" and its roots`);
     return;
   }
-  removeRoot(userTrustDir(), name);
+  removeRoot(dir, name);
   out(`removed trust root "${name}"`);
 }
 
-// `trust fetch <name>`, or every installed bundle when `only` is null.
-// Reports each bundle and errors if any could not be refreshed, leaving that
-// one at its installed version.
-export async function fetchBundles(only) {
+// `trust fetch <name>`, or every installed bundle when `only` is null, in
+// the user's trust directory or the managed one. Reports each bundle and
+// errors if any could not be refreshed, leaving that one at its installed
+// version.
+export async function fetchBundles(only, managed = false) {
   const failed = [];
   let seen = false;
-  for (const i of installedUserBundles(nowSecs())) {
+  for (const i of installedLayerBundles(managed, nowSecs())) {
     const name = i.bundle.name;
     if (only !== null && only !== name) continue;
     seen = true;
@@ -260,8 +271,8 @@ export async function fetchBundles(only) {
     }
     try {
       const { bytes, sidecar } = await readSource(url);
-      const c = check(name, bytes, sidecar);
-      if (!c.unchanged) storeTrustBundle(userTrustDir(), name, bytes, sidecar, url);
+      const c = check(managed, name, bytes, sidecar);
+      if (!c.unchanged) storeTrustBundle(layerTrustDir(managed), name, bytes, sidecar, url);
       out(
         c.unchanged
           ? `${name}: up to date (version ${c.bundle.version})`
@@ -328,12 +339,12 @@ const SIGNING_CONFIG_MEDIA_TYPE = 'application/vnd.dev.sigstore.signingconfig.v0
 // Sigstore's TUF repository. A private deployment named by
 // PROMPTSIGN_FULCIO_URL or PROMPTSIGN_REKOR_URL skips them unless
 // PROMPTSIGN_TUF_URL names its own repository.
-async function tufDocuments() {
+async function tufDocuments(dir) {
   const set = (v) => Boolean(process.env[v]);
   if ((set('PROMPTSIGN_FULCIO_URL') || set('PROMPTSIGN_REKOR_URL')) && !set('PROMPTSIGN_TUF_URL')) {
     return [];
   }
-  const [trustedRoot, signingConfig] = await new TufRepo().fetchTargets([
+  const [trustedRoot, signingConfig] = await new TufRepo(dir).fetchTargets([
     'trusted_root.json',
     'signing_config.v0.2.json',
   ]);
@@ -365,9 +376,9 @@ async function tufDocuments() {
 // Cache the public Fulcio CA chain and Rekor key (the built-in root), and the
 // public trusted_root.json and signing config, so keyless verification is
 // offline from then on. It fetches and checks everything before it writes
-// anything.
-export async function fetchPublicRoot(force) {
-  const dir = trustDir();
+// anything. `managed` writes the managed trust directory instead.
+export async function fetchPublicRoot(force, managed = false) {
+  const dir = managed ? managedTrustDir() : trustDir();
   fs.mkdirSync(dir, { recursive: true });
   const fulcio = envUrl('PROMPTSIGN_FULCIO_URL', DEFAULT_FULCIO);
   const rekor = envUrl('PROMPTSIGN_REKOR_URL', DEFAULT_REKOR);
@@ -384,7 +395,7 @@ export async function fetchPublicRoot(force) {
   if (pemBlockDers(rekorPem, 'PUBLIC KEY').length === 0) {
     throw new Error('Rekor: response is not a PEM public key');
   }
-  const documents = await tufDocuments();
+  const documents = await tufDocuments(dir);
   const fulcioPath = joinRaw(dir, 'fulcio.pem');
   const rekorPath = joinRaw(dir, 'rekor.pub');
   if (!force) {
@@ -404,7 +415,7 @@ export async function fetchPublicRoot(force) {
     fs.writeFileSync(p, bytes);
     out(`wrote ${p}`);
   }
-  out(`rekor log id: ${trustedLogIds()[0]}`);
+  out(`rekor log id: ${parseRekorLogs(rekorPem)[0].logId}`);
 }
 
 export function show() {

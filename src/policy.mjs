@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { promptsignHome } from './keys.mjs';
+import { envOverride, managedPolicyPath } from './managed.mjs';
 import { joinRaw } from './util.mjs';
 
 export const POLICY_SCHEMA = 'promptsign/policy/v1';
@@ -21,20 +22,32 @@ function readPolicyFile(p) {
   return policy;
 }
 
-// The user's policy (spec/04): explicit path, $PROMPTSIGN_POLICY,
-// ~/.promptsign/policy.json, built-in default. A project directory never
-// supplies it; see loadProjectPolicy.
-export function loadPolicy(explicitPath) {
+// The user's policy file, if the user has one (spec/04): explicit path,
+// $PROMPTSIGN_POLICY (unless the managed policy locks the environment),
+// ~/.promptsign/policy.json. A project directory never supplies it; see
+// loadProjectPolicy.
+export function findUserPolicy(explicitPath) {
   const candidates = [
     explicitPath,
-    process.env.PROMPTSIGN_POLICY,
+    envOverride('PROMPTSIGN_POLICY'),
     joinRaw(promptsignHome(), 'policy.json'),
   ].filter(Boolean);
   for (const p of candidates) {
     if (fs.existsSync(p)) return { policy: readPolicyFile(p), source: p };
     if (p === explicitPath) throw new Error(`policy not found: ${p}`);
   }
-  return { policy: DEFAULT_POLICY, source: '(built-in default)' };
+  return null;
+}
+
+// The user's policy file, else the built-in default.
+export function loadPolicy(explicitPath) {
+  return findUserPolicy(explicitPath) ?? { policy: DEFAULT_POLICY, source: '(built-in default)' };
+}
+
+// The machine's managed policy, if it has one (spec/04 "Managed policy").
+export function loadManagedPolicy() {
+  const p = managedPolicyPath();
+  return fs.existsSync(p) ? { policy: readPolicyFile(p), source: p } : null;
 }
 
 // A project's own <project>/.promptsign/policy.json, if any. The project is
@@ -44,14 +57,120 @@ export function loadProjectPolicy(projectDir = process.cwd()) {
   return fs.existsSync(p) ? { policy: readPolicyFile(p), source: p } : null;
 }
 
-export function loadEffectivePolicy(explicitPath, projectDir = process.cwd()) {
-  const user = loadPolicy(explicitPath);
+// Every policy layer in evaluation order (spec/04), as { layer, source,
+// policy }. Without a managed policy the user's policy is the base (the
+// built-in default when the user has none). With one, the managed policy is
+// the base and the user's file, if any, can only tighten it. The project's
+// policy tightens only.
+export function policyLayers(explicitPath, projectDir = process.cwd()) {
+  const managed = loadManagedPolicy();
+  const user = managed ? findUserPolicy(explicitPath) : loadPolicy(explicitPath);
   const project = loadProjectPolicy(projectDir);
+  return [
+    ['managed', managed],
+    ['user', user],
+    ['project', project],
+  ]
+    .filter(([, found]) => found)
+    .map(([layer, found]) => ({ layer, ...found }));
+}
+
+export function loadEffectivePolicy(explicitPath, projectDir = process.cwd()) {
+  const layers = policyLayers(explicitPath, projectDir);
+  const get = (name) => layers.find((l) => l.layer === name)?.policy ?? null;
+  const managed = get('managed');
+  const source = layers
+    .map(({ layer, source }) => {
+      if (layer === 'managed') return `${source} (managed)`;
+      if (layer === 'user' && !managed) return source;
+      return `${source} (tighten only)`;
+    })
+    .join(' + ');
+  return effectivePolicy(managed, get('user'), get('project'), source);
+}
+
+const ORDER = { pass: 0, warn: 1, fail: 2 };
+const withoutTofu = (policy) => ({
+  ...policy,
+  rules: (policy.rules || []).map((r) => ({ ...r, tofu: false })),
+});
+
+// The policy layers for one verification, with the methods that combine
+// them. `base` is the managed policy, else the user's.
+export function effectivePolicy(managed, user, project, source = '') {
+  const base = managed ?? user;
+  const userOverManaged = managed ? user : null;
+  const layers = [base, userOverManaged, project].filter(Boolean);
+  const own = [managed, user].filter(Boolean);
   return {
-    policy: user.policy,
-    project: project ? project.policy : null,
-    source: project ? `${user.source} + ${project.source} (tighten only)` : user.source,
+    managed,
+    user,
+    project,
+    source,
+    base,
+    // Evaluate every layer on one input. The base layer's findings come
+    // unprefixed, a user policy over a managed one adds "user policy: "
+    // findings, a project policy adds "project policy: " ones, and the worst
+    // action wins. TOFU pins are the user's: the base or the user layer
+    // checks them once, a project layer never does.
+    evaluate(input, pins = loadPins()) {
+      const out = evaluate(base, input, pins);
+      const tighten = (extra, prefix) => {
+        if (ORDER[extra.action] > ORDER[out.action]) out.action = extra.action;
+        out.findings.push(...extra.findings.map((f) => ({ ...f, message: prefix + f.message })));
+        out.pinUpdate ??= extra.pinUpdate;
+      };
+      if (userOverManaged) {
+        tighten(
+          out.rule.tofu === true
+            ? evaluate(withoutTofu(userOverManaged), input, {})
+            : evaluate(userOverManaged, input, pins),
+          'user policy: ',
+        );
+      }
+      if (project) tighten(evaluate(withoutTofu(project), input, {}), 'project policy: ');
+      return out;
+    },
+    // True when every layer switches policy checks off for `name`. Then a
+    // broken signature or a marker only warns.
+    off(name) {
+      return layers.every((p) => policyOff(p, name));
+    },
+    // on_trust_bundle_stale (spec/07 §5.6): "fail" when the managed or the
+    // user policy says so.
+    trustBundleStale() {
+      return own.some((p) => p.on_trust_bundle_stale === 'fail') ? 'fail' : 'warn';
+    },
+    // strict: true in the managed or the user policy.
+    strict() {
+      return own.some((p) => p.strict === true);
+    },
   };
+}
+
+// True when the matching rule's action, or the default, is "off".
+export function policyOff(policy, name) {
+  const rule = matchRule(policy, name);
+  return (rule.action || policy.default || 'warn') === 'off';
+}
+
+// True when hooks fail closed: PROMPTSIGN_STRICT=1, or strict: true in the
+// managed or the user policy. A managed policy that does not load counts as
+// strict; a broken user policy does not.
+export function strictMode() {
+  if (process.env.PROMPTSIGN_STRICT === '1') return true;
+  let managed;
+  try {
+    managed = loadManagedPolicy();
+  } catch {
+    return true;
+  }
+  if (managed?.policy.strict === true) return true;
+  try {
+    return findUserPolicy()?.policy.strict === true;
+  } catch {
+    return false;
+  }
 }
 
 export function globMatch(pattern, value) {
@@ -189,24 +308,5 @@ export function evaluate(policy, input, pins = loadPins()) {
 // can only make the outcome stricter: its findings are added and the worse
 // action wins. It never checks or writes TOFU pins (those are the user's).
 export function evaluateWithProject(policy, project, input, pins = loadPins()) {
-  const res = evaluate(policy, input, pins);
-  if (!project) return res;
-  const noTofu = { ...project, rules: (project.rules || []).map((r) => ({ ...r, tofu: false })) };
-  const extra = evaluate(noTofu, input, {});
-  const order = { pass: 0, warn: 1, fail: 2 };
-  return {
-    ...res,
-    action: order[extra.action] > order[res.action] ? extra.action : res.action,
-    findings: [
-      ...res.findings,
-      ...extra.findings.map((f) => ({ ...f, message: `project policy: ${f.message}` })),
-    ],
-  };
-}
-
-// The weight of a signature anchored at a stale trust bundle's root (spec/07
-// §5.6): "warn" (default) or "fail". Read from the user policy only, so a
-// project policy can never set it.
-export function onTrustBundleStale(userPolicy) {
-  return userPolicy.on_trust_bundle_stale === 'fail' ? 'fail' : 'warn';
+  return effectivePolicy(null, policy, project).evaluate(input, pins);
 }

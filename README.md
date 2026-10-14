@@ -63,7 +63,12 @@ node src/index.mjs verify-tree ~/.claude .claude
 
 node src/index.mjs trust add acme https://acme.example/trust-bundle.json --yes
 node src/index.mjs trust list
+node src/index.mjs policy show     # the managed policy, yours, and the project's
 ```
+
+An administrator's managed directory (spec/04) applies here too: its policy is
+the base the user's and the project's tighten, and `trust add|rm|fetch --managed`
+writes its trust directory.
 
 The package is **`@promptsign/reference`** and the command it installs is
 **`promptsign-reference`** — neither is plain `promptsign`, which belongs to the

@@ -54,7 +54,7 @@ test('the project policy is loaded beside the user policy, not instead', () => {
     JSON.stringify(pol([], 'off')),
   );
   const eff = loadEffectivePolicy(userPath, path.join(base, 'repo'));
-  assert.equal(eff.policy.default, 'enforce');
+  assert.equal(eff.user.default, 'enforce');
   assert.equal(eff.project.default, 'off');
   assert.match(eff.source, /tighten only/);
   assert.equal(loadEffectivePolicy(userPath, base).project, null);

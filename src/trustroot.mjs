@@ -14,6 +14,8 @@ import { sha256 } from './canonicalize.mjs';
 import { isSelfSigned } from './chain.mjs';
 import { parseCertificate, pemBodies } from './der.mjs';
 import { promptsignHome } from './keys.mjs';
+import { managedTrustDir } from './managed.mjs';
+import { loadManagedPolicy } from './policy.mjs';
 import { parseRekorLogs, rekorLogEd25519, rekorLogFromSpki, trustDir } from './keyless.mjs';
 import { installedIn } from './trustbundle.mjs';
 import { b64decode, formatIso8601, joinRaw, nowSecs, parseIso8601 } from './util.mjs';
@@ -359,13 +361,98 @@ function registry(dir, pinned) {
   return roots;
 }
 
-// Every root the user trusts (spec/07 §2): the pinned public root from the
-// trust directory, the user's named roots, then the roots of each installed
-// trust bundle. A root file that does not parse, or a stored bundle that
-// does not verify, is an error, not a silent skip.
+// True when `dir` holds the built-in root: the pinned pair, the public
+// trusted_root.json, or both.
+function hasBuiltin(dir) {
+  return (
+    fs.existsSync(joinRaw(dir, 'trusted_root.json')) ||
+    (fs.existsSync(joinRaw(dir, 'fulcio.pem')) && fs.existsSync(joinRaw(dir, 'rekor.pub')))
+  );
+}
+
+// The directory the built-in root comes from: the managed trust directory
+// when it holds one (spec/07 §2.4), else the trust directory.
+export function builtinRootDir() {
+  const managed = managedTrustDir();
+  return hasBuiltin(managed) ? managed : trustDir();
+}
+
+// The built-in root sigstore-public, or null when this machine has none.
+export function loadBuiltin() {
+  const managed = managedTrustDir();
+  if (hasBuiltin(managed)) {
+    const root = loadPinned(managed);
+    return root && { ...root, managed: true };
+  }
+  return loadPinned(trustDir());
+}
+
+const isManaged = (root) => ({ ...root, managed: true });
+
+// Every root this verifier accepts (spec/07 §2): the built-in root, the
+// managed named roots and trust bundles, then the user's own, unless the
+// managed policy sets user_roots: false. A user root or bundle with the name
+// of a managed one is left out, so a policy rule that names a managed root
+// can only match that root. Returns { roots, bundles, ignored }: the trust
+// bundles the roots came from, and the user's roots and bundles left out,
+// with the reason.
+export function loadFullRegistry(now) {
+  const builtin = loadBuiltin();
+  const pub = builtin ? [builtin] : [];
+  const mdir = managedTrustDir();
+  const managedNamed = loadNamedIn(rootsDir(mdir)).map(isManaged);
+  const bundles = installedIn(mdir, pub, now).map((b) => ({
+    ...b,
+    managed: true,
+    bundle: { ...b.bundle, roots: b.bundle.roots.map(isManaged) },
+  }));
+  const taken = [...managedNamed.map((r) => r.name), ...bundles.map((b) => b.bundle.name)];
+  const roots = [...pub, ...managedNamed];
+  const ignored = [];
+  for (const b of bundles) roots.push(...b.bundle.roots);
+
+  const udir = userTrustDir();
+  const userRoots = loadManagedPolicy()?.policy.user_roots !== false;
+  if (!userRoots) {
+    const hasAny = (d) => {
+      try {
+        return fs.readdirSync(d).length > 0;
+      } catch {
+        return false;
+      }
+    };
+    if (hasAny(rootsDir(udir)) || hasAny(joinRaw(udir, 'bundles'))) {
+      ignored.push(`${udir}: ignored, the managed policy sets user_roots to false`);
+    }
+    return { roots, bundles, ignored };
+  }
+  for (const r of loadNamedIn(rootsDir(udir))) {
+    if (taken.includes(r.name)) {
+      ignored.push(
+        `trust root "${r.name}" in ${udir}: ignored, a managed root or bundle has that name`,
+      );
+      continue;
+    }
+    roots.push(r);
+  }
+  for (const b of installedIn(udir, pub, now)) {
+    if (taken.includes(b.bundle.name)) {
+      ignored.push(
+        `trust bundle "${b.bundle.name}" in ${udir}: ignored, a managed root or bundle has that name`,
+      );
+      continue;
+    }
+    roots.push(...b.bundle.roots);
+    bundles.push({ ...b, managed: false });
+  }
+  return { roots, bundles, ignored };
+}
+
+// Every root this verifier accepts: loadFullRegistry at the current time. A
+// root file that does not parse, or a stored bundle that does not verify, is
+// an error, not a silent skip.
 export function loadRegistry() {
-  const pinned = loadPinned(trustDir());
-  return registry(userTrustDir(), pinned ? [pinned] : []);
+  return loadFullRegistry(nowSecs()).roots;
 }
 
 export function loadRegistryFrom(dir) {

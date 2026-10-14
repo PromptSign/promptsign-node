@@ -16,10 +16,10 @@ import {
   defaultIdentity,
   promptsignHome,
 } from './keys.mjs';
-import { DEFAULT_POLICY, loadPolicy, loadPins, savePins } from './policy.mjs';
+import { DEFAULT_POLICY, loadPins, policyLayers, savePins } from './policy.mjs';
 import { verifyTarget } from './verify.mjs';
 import { verifyTree } from './verifytree.mjs';
-import { DEFAULT_ROOT } from './trustroot.mjs';
+import { DEFAULT_ROOT, sortKeys } from './trustroot.mjs';
 import * as trust from './trustcmd.mjs';
 import crypto from 'node:crypto';
 
@@ -32,12 +32,12 @@ Usage:
   promptsign-reference sign <dir|file> [--name n] [--version v] [--kind k] [--identity id] [--key path]
   promptsign-reference verify <dir|file> [--policy path] [--json] [--no-pin-updates]
   promptsign-reference verify-tree <root>... [--policy path] [--json] [--quiet]
-  promptsign-reference policy init [--global]
+  promptsign-reference policy init [--global] | policy show
   promptsign-reference pin list | pin rm <name>
-  promptsign-reference trust fetch [--force] [<bundle>] | trust show
-  promptsign-reference trust add <name> --ca <pem> | trust add <name> --trusted-root <json> [--yes]
-  promptsign-reference trust add <name> <url|file> [--signer <glob>] [--yes]
-  promptsign-reference trust list | trust rm <name>
+  promptsign-reference trust fetch [--force] [--managed] [<bundle>] | trust show
+  promptsign-reference trust add <name> --ca <pem> | trust add <name> --trusted-root <json> [--yes] [--managed]
+  promptsign-reference trust add <name> <url|file> [--signer <glob>] [--yes] [--managed]
+  promptsign-reference trust list | trust rm <name> [--managed]
 
 Signing unit is a bundle manifest: for a directory, every file in it (skills
 include the scripts they run); for a single file, a sidecar <file>.psig.json.
@@ -208,11 +208,47 @@ function cmdPolicy(args) {
     fs.writeFileSync(p, JSON.stringify(DEFAULT_POLICY, null, 2) + '\n');
     process.stdout.write(`wrote ${p}\n`);
   } else if (sub === 'show') {
-    const { policy, source } = loadPolicy();
-    process.stdout.write(`# source: ${source}\n${JSON.stringify(policy, null, 2)}\n`);
+    process.stdout.write(policyShow(process.cwd()));
   } else {
     fail('policy: expected "init" or "show"');
   }
+}
+
+// `policy show`: every layer with the file it came from (spec/04), then the
+// settings in effect. Matches the Rust CLI line for line.
+function policyShow(cwd) {
+  const layers = policyLayers(undefined, cwd);
+  const managed = layers.find((l) => l.layer === 'managed');
+  let out = '';
+  for (const l of layers) {
+    let header = `# project policy (tighten only): ${l.source}`;
+    if (l.layer === 'managed') header = `# managed policy: ${l.source}`;
+    else if (l.layer === 'user' && managed) header = `# user policy (tighten only): ${l.source}`;
+    else if (l.layer === 'user') header = `# source: ${l.source}`;
+    // Keys sorted, as the Rust CLI prints them.
+    out += `${header}\n${JSON.stringify(sortKeys(l.policy), null, 2)}\n`;
+  }
+  const set = (layer, key) => layers.some((l) => l.layer === layer && l.policy[key] === true);
+  let strict = 'off';
+  if (process.env.PROMPTSIGN_STRICT === '1') strict = 'on (PROMPTSIGN_STRICT=1)';
+  else if (set('managed', 'strict')) strict = 'on (managed policy)';
+  else if (set('user', 'strict')) strict = 'on (user policy)';
+  if (managed) {
+    if (!layers.some((l) => l.layer === 'user')) {
+      out += '# user policy: none (the built-in default does not apply under a managed policy)\n';
+    }
+    out += `# lock_env: ${
+      managed.policy.lock_env === true
+        ? 'on (PROMPTSIGN_POLICY, PROMPTSIGN_HOME, PROMPTSIGN_TRUST_DIR and PROMPTSIGN_REVOCATION_FILE are ignored)'
+        : 'off'
+    }\n`;
+    out += `# user_roots: ${
+      managed.policy.user_roots === false
+        ? 'off (only managed roots and the built-in root are trusted)'
+        : 'on'
+    }\n`;
+  }
+  return out + `# strict: ${strict}\n`;
 }
 
 function cmdPin(args) {
@@ -244,19 +280,25 @@ async function cmdTrust(args) {
     const { values, positionals } = parseArgs({
       args: args.slice(1),
       allowPositionals: true,
-      options: { force: { type: 'boolean' } },
+      options: { force: { type: 'boolean' }, managed: { type: 'boolean' } },
     });
+    const managed = Boolean(values.managed);
     // A name refreshes that bundle alone. No name refreshes the built-in
     // root, then every installed bundle (spec/07 §2.2).
-    if (positionals[0] !== undefined) return trust.fetchBundles(positionals[0]);
-    await trust.fetchPublicRoot(Boolean(values.force));
-    return trust.fetchBundles(null);
+    if (positionals[0] !== undefined) return trust.fetchBundles(positionals[0], managed);
+    await trust.fetchPublicRoot(Boolean(values.force), managed);
+    return trust.fetchBundles(null, managed);
   }
   if (sub === 'show') return trust.show();
   if (sub === 'list') return trust.list();
   if (sub === 'rm') {
-    if (!args[1]) fail('trust rm: missing <name>');
-    return trust.remove(args[1]);
+    const { values, positionals } = parseArgs({
+      args: args.slice(1),
+      allowPositionals: true,
+      options: { managed: { type: 'boolean' } },
+    });
+    if (!positionals[0]) fail('trust rm: missing <name>');
+    return trust.remove(positionals[0], Boolean(values.managed));
   }
   if (sub === 'add') {
     const { values, positionals } = parseArgs({
@@ -267,6 +309,7 @@ async function cmdTrust(args) {
         'trusted-root': { type: 'string' },
         signer: { type: 'string' },
         yes: { type: 'boolean' },
+        managed: { type: 'boolean' },
       },
     });
     const name = positionals[0];
@@ -275,12 +318,19 @@ async function cmdTrust(args) {
       if (values.ca !== undefined || values['trusted-root'] !== undefined) {
         fail('trust add: give a bundle <url|file>, or --ca / --trusted-root, not both');
       }
-      return trust.addBundle(name, positionals[1], values.signer, Boolean(values.yes));
+      return trust.addBundle(
+        name,
+        positionals[1],
+        values.signer,
+        Boolean(values.yes),
+        Boolean(values.managed),
+      );
     }
     return trust.addRoot(name, {
       ca: values.ca,
       trustedRoot: values['trusted-root'],
       yes: Boolean(values.yes),
+      managed: Boolean(values.managed),
     });
   }
   fail('trust: expected "fetch", "show", "add", "list" or "rm"');

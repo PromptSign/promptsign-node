@@ -21,15 +21,17 @@ import {
   utf8String,
 } from './der.mjs';
 import { promptsignHome } from './keys.mjs';
+import { envOverride } from './managed.mjs';
 import { leafHash, verifyCheckpoint, verifyInclusion } from './logproof.mjs';
 import { loadRegistry, openWindow } from './trustroot.mjs';
 import { MAX_TIMESTAMPS, verifyTimestamp } from './tsa.mjs';
 import { b64decode, joinRaw } from './util.mjs';
 
-// $PROMPTSIGN_TRUST_DIR, else $PROMPTSIGN_HOME/trust: where the built-in
-// root's fulcio.pem and rekor.pub live.
+// $PROMPTSIGN_TRUST_DIR (unless the managed policy locks the environment),
+// else $PROMPTSIGN_HOME/trust: where the built-in root's fulcio.pem and
+// rekor.pub live.
 export function trustDir() {
-  return process.env.PROMPTSIGN_TRUST_DIR || joinRaw(promptsignHome(), 'trust');
+  return envOverride('PROMPTSIGN_TRUST_DIR') || joinRaw(promptsignHome(), 'trust');
 }
 
 // The host of an http(s) URL, without user info or port; null when empty.

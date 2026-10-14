@@ -177,7 +177,9 @@ function verifyRole(meta, keys, role, what) {
 }
 
 export class Repo {
-  constructor() {
+  // It keeps verified metadata under <dir>/tuf/: the trust directory, or the
+  // managed one for `trust fetch --managed`.
+  constructor(dir = trustDir()) {
     this.url = envUrl('PROMPTSIGN_TUF_URL', DEFAULT_TUF_URL);
     const rootPath = process.env.PROMPTSIGN_TUF_ROOT;
     if (rootPath) {
@@ -189,7 +191,7 @@ export class Repo {
     } else {
       this.initialRoot = fs.readFileSync(EMBEDDED_ROOT);
     }
-    this.cache = joinRaw(trustDir(), 'tuf', cacheName(this.url));
+    this.cache = joinRaw(dir, 'tuf', cacheName(this.url));
     this.now = nowSecs();
   }
 

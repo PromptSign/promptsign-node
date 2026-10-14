@@ -7,9 +7,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { sha256 } from './canonicalize.mjs';
+import { envOverride } from './managed.mjs';
 
+// $PROMPTSIGN_HOME, else ~/.promptsign. A managed lock_env keeps the default
+// (spec/04).
 export function promptsignHome() {
-  return process.env.PROMPTSIGN_HOME || path.join(os.homedir(), '.promptsign');
+  return envOverride('PROMPTSIGN_HOME') || path.join(os.homedir(), '.promptsign');
 }
 
 export function defaultKeyPath() {

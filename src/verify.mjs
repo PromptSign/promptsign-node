@@ -8,25 +8,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hasSignatureMarker, readBundle, verifyEnvelope } from './bundle.mjs';
 import { checkIntegrity, walkFiles, CONTEXT_INJECTED } from './manifest.mjs';
-import {
-  loadEffectivePolicy,
-  loadPins,
-  savePins,
-  evaluateWithProject,
-  matchRule,
-  onTrustBundleStale,
-} from './policy.mjs';
-import { installedUserBundles } from './trustbundle.mjs';
+import { loadEffectivePolicy, loadPins, savePins } from './policy.mjs';
+import { loadFullRegistry } from './trustroot.mjs';
 import { formatIso8601, nowSecs } from './util.mjs';
 
 const FORMAT_PROMPTSIGN = 'promptsign';
-
-// True when the effective policy action for `name` is "off" — marker findings
-// then degrade from fail to warn (but are always surfaced).
-function policyOff(policy, name) {
-  const rule = matchRule(policy, name);
-  return (rule.action || policy.default || 'warn') === 'off';
-}
 
 // An `x-promptsign:` marker inside a context-injected file (CLAUDE.md/AGENTS.md/
 // OpenClaw bootstrap files) is never a signature — its presence is a failure.
@@ -65,27 +51,29 @@ function contextMarkerMessages(abs, isDir) {
 const ACTION_RANK = { pass: 0, warn: 1, fail: 2 };
 
 // Fold context-injected marker warnings into a result: they add findings and
-// force at least "fail" (downgraded to "warn" only under a policy "off", so
-// the warning is surfaced either way). Returns the bumped action.
-function applyMarkers(msgs, policy, name, findings, action) {
+// force at least "fail" (downgraded to "warn" only when every policy layer is
+// "off", so the warning is surfaced either way). Returns the bumped action.
+function applyMarkers(msgs, eff, name, findings, action) {
   if (msgs.length === 0) return action;
-  const off = policyOff(policy, name);
+  const off = eff.off(name);
   for (const m of msgs) findings.push({ level: off ? 'warn' : 'error', message: m });
   const bump = off ? 'warn' : 'fail';
   return ACTION_RANK[bump] > ACTION_RANK[action] ? bump : action;
 }
 
 // A root from a trust bundle past its expiry still verifies, with a finding
-// whose weight the user policy sets (spec/07 §5.6). Only bundle roots, named
-// <bundle>/<root>, can be stale.
-function staleBundleFinding(policy, root) {
+// whose weight the managed and user policies set (spec/07 §5.6). Only bundle
+// roots, named <bundle>/<root>, can be stale.
+function staleBundleFinding(eff, root) {
   const slash = root.indexOf('/');
   if (slash === -1) return null;
   const bundle = root.slice(0, slash);
-  const stale = installedUserBundles(nowSecs()).find((i) => i.bundle.name === bundle && i.stale);
+  const stale = loadFullRegistry(nowSecs()).bundles.find(
+    (i) => i.bundle.name === bundle && i.stale,
+  );
   if (!stale) return null;
   return {
-    level: onTrustBundleStale(policy) === 'fail' ? 'error' : 'warn',
+    level: eff.trustBundleStale() === 'fail' ? 'error' : 'warn',
     message: `trust bundle "${bundle}" expired at ${formatIso8601(stale.bundle.expires)}: run "promptsign trust fetch" to refresh it`,
   };
 }
@@ -97,7 +85,8 @@ function staleBundleFinding(policy, root) {
 // skipPolicy: crypto + integrity only — used by the signer's post-sign
 // self-check, where the local policy/pin store must not gate signing.
 export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy = false } = {}) {
-  const { policy, project, source: policySource } = loadEffectivePolicy(policyPath);
+  const eff = loadEffectivePolicy(policyPath);
+  const policySource = eff.source;
   const abs = path.resolve(target);
   const st = fs.statSync(abs);
   const root = st.isDirectory() ? abs : path.dirname(abs);
@@ -106,9 +95,9 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
 
   const found = readBundle(abs);
   if (!found) {
-    const res = evaluateWithProject(policy, project, { name: fallbackName, signed: false });
+    const res = eff.evaluate({ name: fallbackName, signed: false }, {});
     const findings = res.findings;
-    const action = applyMarkers(markerMsgs, policy, fallbackName, findings, res.action);
+    const action = applyMarkers(markerMsgs, eff, fallbackName, findings, res.action);
     return {
       target,
       policySource,
@@ -127,12 +116,12 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
   } catch (e) {
     // A broken/forged signature is never silently ignored: at least a warning
     // even under action "off", a failure under "warn"/"enforce".
-    const off = policyOff(policy, fallbackName);
+    const off = eff.off(fallbackName);
     let action = off ? 'warn' : 'fail';
     const findings = [
       { level: action === 'fail' ? 'error' : 'warn', message: `invalid signature: ${e.message}` },
     ];
-    action = applyMarkers(markerMsgs, policy, fallbackName, findings, action);
+    action = applyMarkers(markerMsgs, eff, fallbackName, findings, action);
     return {
       target,
       policySource,
@@ -185,9 +174,7 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
 
   const pins = loadPins();
   // Keyless signers pin identity+issuer, never the ephemeral key (spec/05 §5).
-  const res = evaluateWithProject(
-    policy,
-    project,
+  const res = eff.evaluate(
     {
       name: manifest.name,
       identity,
@@ -202,9 +189,9 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
   if (res.action === 'fail') action = 'fail';
   else if (res.action === 'warn' && action === 'pass') action = 'warn';
 
-  action = applyMarkers(markerMsgs, policy, manifest.name, findings, action);
+  action = applyMarkers(markerMsgs, eff, manifest.name, findings, action);
 
-  const stale = trustRoot ? staleBundleFinding(policy, trustRoot) : null;
+  const stale = trustRoot ? staleBundleFinding(eff, trustRoot) : null;
   if (stale) {
     if (stale.level === 'error') action = 'fail';
     else if (action === 'pass') action = 'warn';
