@@ -91,6 +91,15 @@ function makeRoot(name, caCerts, caValid, rekorLogs, tsas = []) {
     caValidAt(cert, t) {
       return this.caCerts.some((c, i) => c.der.equals(cert.der) && this.caValid[i].contains(t));
     },
+    // The first certificate on `path` that this root lists but that no
+    // entry listing it holds valid at `t` (spec/07 §4). Checking every
+    // listed certificate, not only the top one, keeps a retired
+    // intermediate retired when a newer entry shares its root.
+    caOutsideWindow(path, t) {
+      return path.find(
+        (cert) => this.caCerts.some((c) => c.der.equals(cert.der)) && !this.caValidAt(cert, t),
+      );
+    },
   };
 }
 

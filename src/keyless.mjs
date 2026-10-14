@@ -177,11 +177,12 @@ export function keylessRoots() {
   return roots;
 }
 
-// The validity windows of spec/07 §4 at signing time `t`: the CA the chain
-// ends at, under any of its entries, and the log key that witnessed it.
+// The validity windows of spec/07 §4 at signing time `t`: every CA on the
+// path that the root lists, under any of its entries, and the log key that
+// witnessed it.
 function checkWindows(a, log, t) {
-  const ca = a.path[a.path.length - 1];
-  if (!a.root.caValidAt(ca, t)) {
+  const ca = a.root.caOutsideWindow(a.path, t);
+  if (ca) {
     throw new Error(
       `certificate authority "${ca.subject}" of trust root "${a.root.name}" was outside its validity window when the signature was made (${t})`,
     );

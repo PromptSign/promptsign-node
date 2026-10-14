@@ -397,3 +397,35 @@ test('trust rm removes a bundle and all its roots', async () => {
   assert.equal(rm.stdout, 'removed trust bundle "acme" and its roots\n');
   assert.equal((await verifyJson(h, 'prod-signed')).code, 2);
 });
+
+test('a retired intermediate stays retired when a newer entry lists its root', async () => {
+  const h = home();
+  const rotated = (n) => path.join(F, 'rotated', `${n}.txt`);
+  const add = await run(
+    h,
+    'trust',
+    'add',
+    'acme-rotated',
+    '--trusted-root',
+    path.join(F, 'rotated', 'trusted_root.json'),
+    '--yes',
+  );
+  assert.equal(add.code, 0, add.stderr);
+
+  const before = await run(h, 'verify', rotated('before-rotation'), '--json', '--no-pin-updates');
+  assert.equal(before.code, 0, before.stdout);
+  assert.equal(JSON.parse(before.stdout).root, 'acme-rotated');
+
+  const after = await run(
+    h,
+    'verify',
+    rotated('retired-intermediate'),
+    '--json',
+    '--no-pin-updates',
+  );
+  assert.equal(after.code, 2);
+  assert.match(
+    JSON.parse(after.stdout).findings[0].message,
+    /^invalid signature: certificate authority "CN=acme rotated intermediate 1,O=promptsign tests" of trust root "acme-rotated" was outside its validity window/,
+  );
+});
