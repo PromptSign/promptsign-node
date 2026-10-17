@@ -263,6 +263,13 @@ export function evaluate(policy, input, pins = loadPins()) {
     raise(level === 'enforce' ? 'fail' : 'warn');
   };
 
+  // This implementation does not check approvals (spec/09 §4), so it treats
+  // a rule that requires them as unmet.
+  if (rule.approval != null) {
+    violate(
+      `"${name}" requires approvals, which this verifier does not check (rule: ${rule.pattern})`,
+    );
+  }
   if (!signed) {
     violate(`unsigned artifact "${name}" (rule: ${rule.pattern})`);
     return { action, findings, rule, pinUpdate: null };
