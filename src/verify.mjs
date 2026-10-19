@@ -7,6 +7,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { approvalFiles, collect, listingFor, listingOf } from './approval.mjs';
 import { hasSignatureMarker, readBundle, verifyEnvelope } from './bundle.mjs';
 import { checkIntegrity, walkFiles, CONTEXT_INJECTED } from './manifest.mjs';
 import { loadEffectivePolicy, loadPins, savePins } from './policy.mjs';
@@ -94,9 +95,50 @@ function staleBundleFinding(eff, root) {
   };
 }
 
+// The approvals of the artifact's content when a layer's rule for `name`
+// requires them (spec/09); none otherwise, so verification without approval
+// rules reads no extra files. `listing` computes the content listing.
+function approvalsFor(eff, name, abs, isDir, listing) {
+  if (!eff.needsApprovals(name)) return { approvals: [], findings: [] };
+  // This verifier reads no revocation feed, so it cannot tell whether one
+  // withdraws an approval. Under a policy that names a feed, none count.
+  if (eff.namesRevocationFeed()) {
+    return {
+      approvals: [],
+      findings: [
+        {
+          level: 'info',
+          message:
+            'approvals not counted: the policy names a revocation feed, which this verifier does not read',
+        },
+      ],
+    };
+  }
+  let content;
+  try {
+    content = listing();
+  } catch (e) {
+    return {
+      approvals: [],
+      findings: [{ level: 'info', message: `approvals not checked: ${e.message}` }],
+    };
+  }
+  return collect(approvalFiles(abs, isDir, content.digest), content.digest);
+}
+
+// The approvals as the result lists them, the fields of the Rust Approval.
+const shown = (approvals) =>
+  approvals.length === 0
+    ? {}
+    : {
+        approvals: approvals.map(({ identity, issuer, root, signedAt }) =>
+          signedAt == null ? { identity, issuer, root } : { identity, issuer, root, signedAt },
+        ),
+      };
+
 // Result: { target, policySource, name, version?, kind?, identity, issuer?,
-// keyid, integratedTime?, format?, root?, signed, action, findings }, the
-// field order and omissions of the Rust VerifyResult.
+// keyid, integratedTime?, format?, root?, signed, action, findings,
+// approvals? }, the field order and omissions of the Rust VerifyResult.
 // action: 'pass' | 'warn' | 'fail'
 // skipPolicy: crypto + integrity only — used by the signer's post-sign
 // self-check, where the local policy/pin store must not gate signing.
@@ -111,8 +153,12 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
 
   const found = readBundle(abs);
   if (!found) {
-    const res = eff.evaluate({ name: fallbackName, signed: false }, {});
-    const findings = res.findings;
+    const approved = approvalsFor(eff, fallbackName, abs, st.isDirectory(), () => listingFor(abs));
+    const res = eff.evaluate(
+      { name: fallbackName, signed: false, approvals: approved.approvals },
+      {},
+    );
+    const findings = [...approved.findings, ...res.findings];
     const action = applyMarkers(markerMsgs, eff, fallbackName, findings, res.action);
     return withEvidence(
       {
@@ -124,6 +170,7 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
         signed: false,
         action,
         findings,
+        ...shown(approved.approvals),
       },
       { rule: res.decidedBy },
     );
@@ -194,6 +241,11 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
     );
   }
 
+  // A tampered artifact fails whatever its approvals say, so skip them.
+  const approved =
+    action === 'fail'
+      ? { approvals: [], findings: [] }
+      : approvalsFor(eff, manifest.name, abs, st.isDirectory(), () => listingOf(manifest.files));
   const pins = loadPins();
   // Keyless signers pin identity+issuer, never the ephemeral key (spec/05 §5).
   const res = eff.evaluate(
@@ -204,10 +256,11 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
       issuer,
       root: trustRoot,
       signed: true,
+      approvals: approved.approvals,
     },
     pins,
   );
-  findings.push(...res.findings);
+  findings.push(...approved.findings, ...res.findings);
   if (res.action === 'fail') action = 'fail';
   else if (res.action === 'warn' && action === 'pass') action = 'warn';
 
@@ -230,7 +283,7 @@ export function verifyTarget(target, { policyPath, updatePins = true, skipPolicy
   }
 
   return withEvidence(
-    { target, policySource, ...signerFields, action, findings },
+    { target, policySource, ...signerFields, action, findings, ...shown(approved.approvals) },
     { payloadDigest: payloadDigest(found.bundle), rule: res.decidedBy },
   );
 }

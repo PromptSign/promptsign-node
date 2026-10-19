@@ -31,6 +31,7 @@ below:
 | [05 — keyless](https://github.com/PromptSign/spec/blob/main/05-keyless.md) | verification only, offline; **no** keyless signing |
 | [06 — revocation feed](https://github.com/PromptSign/spec/blob/main/06-revocation.md) | **no** |
 | [07: trust roots](https://github.com/PromptSign/spec/blob/main/07-trust-roots.md) | yes for keyless roots: the built-in public root, named roots, trust bundles (`trust add`, `fetch`, `list`, `rm`); `--ca` certificate roots are stored and listed but verify nothing yet |
+| [09: approvals](https://github.com/PromptSign/spec/blob/main/09-approvals.md) | verification of keyless approvals, in PromptSign or Sigstore bundles, and the `approval` policy rule; `approve --listing` prints the content listing. No signing, and no approval counts under a policy that names a revocation feed |
 
 Keyless verification needs no network: the certificate chain and the
 transparency-log entry are stapled into the bundle, and the roots they chain to

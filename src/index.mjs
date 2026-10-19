@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
+import { listingFor } from './approval.mjs';
 import { buildManifest } from './manifest.mjs';
 import { signManifest, writeBundle } from './bundle.mjs';
 import {
@@ -47,11 +48,13 @@ Verification = signature + integrity against disk + trust policy + TOFU pins.
 
 This is the reference implementation. It signs with a local key (spec 01-04)
 and verifies local-key and keyless (Sigstore) signatures, offline, against the
-built-in public root, named roots and trust bundles (spec 05, 07). Keyless
-signing, the revocation feed, embedded signatures, OpenSSF Model Signing
-verification and approvals live in the promptsign CLI; approve --listing
-prints the content listing an approval covers (spec 09), and a policy rule
-that requires approvals fails here.`;
+built-in public root, named roots and trust bundles (spec 05, 07), and
+counts keyless approvals a policy rule requires (spec 09). Keyless signing,
+signing approvals, the revocation feed, embedded signatures, certificate-mode
+signatures and OpenSSF Model Signing verification live in the promptsign CLI.
+approve --listing prints the content listing an approval covers, for use with
+other signing tools. Under a policy that names a revocation feed, no approval
+counts here.`;
 
 function fail(msg) {
   process.stderr.write(`promptsign-reference: ${msg}\n`);
@@ -108,8 +111,7 @@ function cmdKeygen(args) {
     );
 }
 
-// The content listing an approval covers (spec/09 §1): the manifest a signer
-// would build, one "<sha256>  <path>" line per file, sorted by path bytes.
+// The content listing an approval covers (spec/09 §1).
 function cmdApprove(args) {
   const { values, positionals } = parseArgs({
     args,
@@ -119,15 +121,7 @@ function cmdApprove(args) {
   if (!values.listing) fail('approve: only --listing here; sign approvals with the promptsign CLI');
   if (!positionals[0]) fail('approve: missing <dir|file>');
 
-  const abs = path.resolve(positionals[0]);
-  const manifest = fs.statSync(abs).isDirectory()
-    ? buildManifest({ root: abs })
-    : buildManifest({ root: path.dirname(abs), singleFile: abs });
-  const lines = manifest.files
-    .map((f) => [f.path, f.sha256])
-    .sort(([a], [b]) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
-
-  process.stdout.write(lines.map(([p, h]) => `${h}  ${p}\n`).join(''));
+  process.stdout.write(listingFor(positionals[0]).text);
 }
 
 function cmdSign(args) {

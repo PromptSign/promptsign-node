@@ -52,7 +52,7 @@ test('unsigned artifact: enforce fails, warn warns, off passes', () => {
   assert.equal(evaluate(policy, { name: 'internal/x', signed: false }, {}).action, 'pass');
 });
 
-test('a rule that requires approvals is unmet here, never absent', () => {
+test('a rule that requires approvals fails a signed artifact without them', () => {
   const approvals = {
     schema: POLICY_SCHEMA,
     rules: [
@@ -66,7 +66,7 @@ test('a rule that requires approvals is unmet here, never absent', () => {
   const r = evaluate(approvals, { name: 'x', identity: 'alice', keyid: 'k', signed: true }, {});
 
   assert.equal(r.action, 'fail');
-  assert.match(r.findings[0].message, /requires approvals/);
+  assert.match(r.findings[0].message, /has 0 of 1 required approval /);
 });
 
 test('TOFU: first sighting requests a pin, identity change hard-fails', () => {

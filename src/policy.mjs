@@ -145,6 +145,15 @@ export function effectivePolicy(managed, user, project, source = '') {
       if (project) tighten(evaluate(withoutTofu(project), input, {}), 'project', project);
       return out;
     },
+    // True when some layer's rule for `name` requires approvals, so the
+    // verifier has to collect them (spec/09).
+    needsApprovals(name) {
+      return layers.some((p) => matchRule(p, name).approval != null);
+    },
+    // True when some layer names a revocation feed (spec/06).
+    namesRevocationFeed() {
+      return layers.some((p) => p.revocation_feed != null);
+    },
     // True when every layer switches policy checks off for `name`. Then a
     // broken signature or a marker only warns.
     off(name) {
@@ -240,10 +249,29 @@ function pinIdentity(identity, issuer) {
   return at === -1 ? identity : identity.slice(0, at);
 }
 
+// The violation message when fewer distinct approvers than the rule's
+// threshold accepted `approvals` (spec/09 §4), else null. Each identity and
+// issuer pair counts once.
+function unmetApprovals(req, name, pattern, approvals) {
+  const threshold = Math.max(1, Number.isInteger(req.threshold) ? req.threshold : 1);
+  const glob = (g, v) => g == null || globMatch(g, v ?? '');
+  const accepts = (a) =>
+    (req.approvers ?? []).some(
+      (p) =>
+        globMatch(p.identity ?? '', a.identity) &&
+        glob(p.issuer, a.issuer) &&
+        glob(p.trust_root, a.root),
+    );
+  const who = new Set(approvals.filter(accepts).map((a) => JSON.stringify([a.identity, a.issuer])));
+  if (who.size >= threshold) return null;
+  return `"${name}" has ${who.size} of ${threshold} required approval${threshold === 1 ? '' : 's'} (rule: ${pattern})`;
+}
+
 // Evaluate a verified signer against policy. `signed: false` means no bundle
 // was found at all. `issuer` is set only for keyless signers (whose `keyid`
-// is then empty: pins must not bind ephemeral keys), and `root` is the
-// registry root the signature chained to. Returns { action, findings,
+// is then empty: pins must not bind ephemeral keys), `root` is the registry
+// root the signature chained to, and `approvals` the verified approvals of
+// the artifact's content (spec/09). Returns { action, findings,
 // pinUpdate } where action is the worst outcome: 'pass' | 'warn' | 'fail'.
 export function evaluate(policy, input, pins = loadPins()) {
   const { name, signed, issuer = null, root = null } = input;
@@ -263,15 +291,23 @@ export function evaluate(policy, input, pins = loadPins()) {
     raise(level === 'enforce' ? 'fail' : 'warn');
   };
 
-  // This implementation does not check approvals (spec/09 §4), so it treats
-  // a rule that requires them as unmet.
-  if (rule.approval != null) {
-    violate(
-      `"${name}" requires approvals, which this verifier does not check (rule: ${rule.pattern})`,
-    );
-  }
+  const approvalUnmet =
+    rule.approval != null
+      ? unmetApprovals(rule.approval, name, rule.pattern, input.approvals ?? [])
+      : null;
+
   if (!signed) {
-    violate(`unsigned artifact "${name}" (rule: ${rule.pattern})`);
+    // Approvals of the exact bytes stand in for a signature, unless the rule
+    // also constrains the author (spec/09 §4).
+    const authorFree =
+      rule.approval != null &&
+      rule.identity == null &&
+      rule.issuer == null &&
+      rule.keyid == null &&
+      rule.trust_root == null &&
+      rule.signers == null;
+    if (!authorFree) violate(`unsigned artifact "${name}" (rule: ${rule.pattern})`);
+    if (approvalUnmet) violate(approvalUnmet);
     return { action, findings, rule, pinUpdate: null };
   }
 
@@ -302,6 +338,7 @@ export function evaluate(policy, input, pins = loadPins()) {
         `of the ${rule.signers.length} signers allowed for "${name}" (rule: ${rule.pattern})`,
     );
   }
+  if (approvalUnmet) violate(approvalUnmet);
 
   let pinUpdate = null;
   if (rule.tofu === true) {
