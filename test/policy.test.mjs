@@ -133,6 +133,37 @@ test('issuer and trust_root rules glob the keyless issuer and the root name', ()
   );
 });
 
+test('a signers rule passes any listed signer and keeps the rule keys', () => {
+  const p = {
+    schema: POLICY_SCHEMA,
+    rules: [
+      {
+        pattern: '*',
+        issuer: 'https://sso.acme.test',
+        signers: [
+          { identity: '*@acme.test', trust_root: 'acme/*' },
+          { identity: '*@partner.test', trust_root: 'partner/*' },
+        ],
+        action: 'enforce',
+      },
+    ],
+  };
+  const run = (identity, issuer, root) =>
+    evaluate(p, { name: 's', identity, keyid: '', issuer, root, signed: true }, {});
+  const ours = 'https://sso.acme.test';
+  assert.equal(run('alice@acme.test', ours, 'acme/prod').action, 'pass');
+  assert.equal(run('bob@partner.test', ours, 'partner/prod').action, 'pass');
+  const crossed = run('bob@partner.test', ours, 'acme/prod');
+  assert.equal(crossed.action, 'fail');
+  assert.equal(
+    crossed.findings[0].message,
+    'signer "bob@partner.test" (issuer "https://sso.acme.test", trust root "acme/prod") ' +
+      'matches none of the 2 signers allowed for "s" (rule: *)',
+  );
+  assert.equal(run('eve@evil.test', ours, 'acme/prod').action, 'fail');
+  assert.equal(run('alice@acme.test', 'https://other.test', 'acme/prod').action, 'fail');
+});
+
 test('keyless pins bind identity and issuer; a CI workflow pin ignores its git ref', () => {
   const p = { schema: POLICY_SCHEMA, rules: [{ pattern: '*', action: 'warn', tofu: true }] };
   const iss = 'https://token.actions.githubusercontent.com';

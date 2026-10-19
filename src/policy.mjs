@@ -289,6 +289,19 @@ export function evaluate(policy, input, pins = loadPins()) {
   if (rule.keyid != null && rule.keyid !== keyid) {
     violate(`keyid ${keyid.slice(0, 16)}… does not match pinned rule keyid`);
   }
+  // `signers` lists alternatives: one entry whose keys all match is enough.
+  const glob = (g, v) => g == null || globMatch(g, v ?? '');
+  const accepts = (s) =>
+    glob(s.identity, identity) &&
+    glob(s.issuer, issuer) &&
+    glob(s.trust_root, root) &&
+    (s.keyid == null || s.keyid === keyid);
+  if (rule.signers != null && !rule.signers.some(accepts)) {
+    violate(
+      `signer "${identity}" (issuer "${issuer ?? ''}", trust root "${root ?? ''}") matches none ` +
+        `of the ${rule.signers.length} signers allowed for "${name}" (rule: ${rule.pattern})`,
+    );
+  }
 
   let pinUpdate = null;
   if (rule.tofu === true) {
